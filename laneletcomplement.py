@@ -193,6 +193,11 @@ class CurveIndex:
     def __init__(self, ind, t):
         self.i = ind
         self.t = t
+    def __str__(self):
+        return "Index: i {}, t {}".format(self.i, self.t)
+    def __repr__(self):
+        return "Index: i {}, t {}".format(self.i, self.t)
+
 class CurveProjection:
     def __init__(self, curveindex, d, phi):
         self.ind = curveindex
@@ -214,7 +219,8 @@ class Grid:
                        center_index=None,
                        center_lanelet_id=None,
                        from_disp=None,
-                       to_disp=None):
+                       to_disp=None,
+                       lanelet_network=None):
         self.from_index = from_index
         self.to_index = to_index
         self.from_lanelet_id = from_lanelet_id
@@ -223,6 +229,47 @@ class Grid:
         self.center_lanelet_id = center_lanelet_id
         self.center_s = -from_disp
         self.to_s = -from_disp+to_disp
+        assert (-from_disp >=0 and to_disp >= 0)
+        grid_length = -from_disp + to_disp
+
+        from_lanelet = lanelet_network.find_lanelet_by_id(from_lanelet_id)
+        center_lanelet = lanelet_network.find_lanelet_by_id(center_lanelet_id)
+        to_lanelet = lanelet_network.find_lanelet_by_id(to_lanelet_id)
+        from_curve = from_lanelet.center_curve
+        from_curvePt = lerp_curve(from_curve[from_index.i],
+                                  from_curve[from_index.i+1],
+                                  from_index.t)
+        to_curve = to_lanelet.center_curve
+        to_curvePt = lerp_curve(to_curve[to_index.i],
+                                to_curve[to_index.i+1],
+                                to_index.t)
+        if from_curvePt.s + grid_length/3 > from_curve[-1].s:
+            assert center_lanelet_id in from_lanelet.successor, "cen {}, from {} from_succ {} to {} grid_length {} from_s {} cen {}".format(center_lanelet_id,
+                                                                                                                           from_lanelet_id,
+                                                                                                                           from_lanelet.successor, to_lanelet_id,
+                                                                                                                           grid_length, -from_disp, center_index)
+            assert from_curvePt.s+grid_length/3-from_curve[-1].s <= center_lanelet.center_curve[-1].s
+            new_index1, _ = get_curve_index(CurveIndex(0,0.0),
+                                            center_lanelet.center_curve,
+                                            from_curvePt.s+grid_length/3-from_curve[-1].s)
+            point1 = (new_index1, center_lanelet_id)
+        else:
+            new_index1, _ = get_curve_index(from_index, from_curve, grid_length/3)
+            point1 = (new_index1, from_lanelet_id)
+        if to_curvePt.s - grid_length/3 < 0.0:
+            assert center_lanelet_id in to_lanelet.predecessor, "{} {} {} {} {}".format(from_index, center_index, to_index, -from_disp, to_disp)
+            assert center_lanelet.center_curve[-1].s+to_curvePt.s-grid_length/3 >= 0.
+            new_index2, _ = get_curve_index(CurveIndex(0,0.0),
+                                            center_lanelet.center_curve,
+                                            center_lanelet.center_curve[-1].s+to_curvePt.s-grid_length/3)
+            point2 = (new_index2, center_lanelet_id)
+        else:
+            new_index2, _ = get_curve_index(to_index, to_curve, -grid_length/3)
+            point2 = (new_index2, to_lanelet_id)
+        self.points = [(from_index,from_lanelet_id),
+                       point1, point2,
+                       (to_index,to_lanelet_id)]
+
     def __str__(self):
         return "Grid: from_id {}, ind {}, t {:.2f} \n cen_id {}, ind {}, t {:.2f} \n to_id {}, ind {}, t {:.2f}".format(self.from_lanelet_id, self.from_index.i, self.from_index.t, \
                                                                                                                         self.center_lanelet_id, self.center_index.i, self.center_index.t, \
@@ -233,7 +280,7 @@ class Grid:
                                                                                                                         self.to_lanelet_id, self.to_index.i, self.to_index.t)
 
     def is_in_grid(self, index, lanelet_id):
-        if lanelet_id == self.from_lanelet_id or lanelet_id == self.to_lanelet_id:
+        if lanelet_id == self.from_lanelet_id or lanelet_id == self.to_lanelet_id or lanelet_id == self.center_lanelet_id:
             if lanelet_id == self.from_lanelet_id:
                 if self.from_index.i < index.i or (self.from_index.i == index.i and self.from_index.t <= index.t):
                     if self.from_lanelet_id != self.to_lanelet_id:
@@ -241,15 +288,23 @@ class Grid:
                     else:
                         if self.to_index.i > index.i or (self.to_index.i == index.i and self.to_index.t >= index.t):
                             return True
+                        else:
+                            return False
+                else:
+                    return False
+            elif lanelet_id == self.to_lanelet_id:
+                if self.to_index.i > index.i or (self.to_index.i == index.i and self.to_index.t >= index.t):
+                    if self.from_lanelet_id != self.to_lanelet_id:
+                        return True
+                    else:
+                        if self.from_index.i < index.i or (self.from_index.i==index.i and self.from_index.t <= index.t):
+                            return True
+                        else:
+                            return False
                 else:
                     return False
             else:
-                if self.to_index.i > index.i:
-                    return True
-                elif self.to_index.i == index.i and self.to_index.t >= index.t:
-                    return True
-                else:
-                    return False
+                return True
         else:
             return False
 def proj_on_line(a : VecE2, b : VecE2):

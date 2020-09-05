@@ -186,7 +186,7 @@ class Frenet:
         #result_lane = lanelet_network.find_lanelet_by_id(result_posF.ind[1])
         if target_lanelet == lanelet.adj_left or target_lanelet == lanelet.adj_right and target_lanelet is not None:
             result_posG = result_posF.get_posG_from_posF(lanelet_network)
-            result_posF = Frenet(result_posG.projF(lanelet_network, [target_lanelet]), lanelet_network)
+            result_posF = Frenet(result_posG.projF(lanelet_network, [target_lanelet, lanelet.lanelet_id]), lanelet_network)
         #if result_posF.d >= 3.0 *0.5 and result_lane.adj_left is not None:
         #    result_posG = result_posF.get_posG_from_posF(lanelet_network)
         #    result_posF = Frenet(result_posG.projF(lanelet_network, [result_posF.ind[1], result_lane.adj_left]), lanelet_network)

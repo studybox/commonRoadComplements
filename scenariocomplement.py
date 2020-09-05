@@ -55,22 +55,65 @@ class ScenarioWrapper:
 
     def add_grids(self, grids):
         self.grids = grids
-    def locate_on_grid(self, time_step, vehicle_id):
+
+    def locate_on_grid(self, time_step, vehicle_id, initial_cands=None):
         ego_vehicle = self.obstacles[time_step][vehicle_id]
         posF = ego_vehicle.initial_state.posF
         cands = []
+        projections = {posF.ind[1]:(posF.s, posF.d)}
+        best_dist2 = float('inf')
+        best_projection = None
         for index, grid in enumerate(self.grids):
+            # get the s and d
+            if initial_cands is not None:
+                if index not in initial_cands:
+                    continue
+            if grid.from_lanelet_id not in projections:
+                projF = Frenet(ego_vehicle.initial_state.posG.projF(self.lanelet_network, [grid.from_lanelet_id]), self.lanelet_network)
+                projections[grid.from_lanelet_id] = (projF.s, projF.d)
+            if grid.center_lanelet_id not in projections:
+                projF = Frenet(ego_vehicle.initial_state.posG.projF(self.lanelet_network, [grid.center_lanelet_id]), self.lanelet_network)
+                projections[grid.center_lanelet_id] = (projF.s, projF.d)
+            if grid.to_lanelet_id not in projections:
+                projF = Frenet(ego_vehicle.initial_state.posG.projF(self.lanelet_network, [grid.to_lanelet_id]), self.lanelet_network)
+                projections[grid.to_lanelet_id] = (projF.s, projF.d)
+
             if grid.is_in_grid(posF.ind[0], posF.ind[1]):
                 cands.append(index)
-        #print(time_step, vehicle_id, posF.ind[1])
+        #print(time_step, vehicle_id, posF.ind[1], projections)
         #if time_step == 4923 and vehicle_id==127:
         #    print(posF.ind[1], posF.ind[0].i, posF.ind[0].t)
-        if (len(cands) != 1 and len(cands) != 2):
+        if len(cands) > 4:
             print("there are {} grid for veh {} at {} {} {}".format(len(cands), vehicle_id, posF.ind[1], posF.ind[0].i, posF.ind[0].t))
-            for grid in self.grids:
-                print(grid)
-            assert (len(cands) == 1 or len(cands) == 2)
+            #for grid in self.grids:
+            #    print(grid)
+            #assert (len(cands) == 0 or len(cands) == 1 or len(cands) == 2)
+        if len(cands) == 0:
+            for index, grid in enumerate(self.grids):
+                if initial_cands is not None:
+                    if index not in initial_cands:
+                        continue
+                from_lanelet = self.lanelet_network.find_lanelet_by_id(grid.from_lanelet_id)
+                from_curve = from_lanelet.center_curve
+                from_curve_pt = lerp_curve(from_curve[grid.from_index.i], from_curve[grid.from_index.i+1], grid.from_index.t)
+                new_s = projections[grid.from_lanelet_id][0]-from_curve_pt.s
 
+                center_lanelet = self.lanelet_network.find_lanelet_by_id(grid.center_lanelet_id)
+                center_curve = center_lanelet.center_curve
+                center_curve_pt = lerp_curve(center_curve[grid.center_index.i], center_curve[grid.center_index.i+1], grid.center_index.t)
+                c_dist2 = (center_curve_pt.s- projections[grid.center_lanelet_id][0])**2 + projections[grid.center_lanelet_id][1]**2
+                if c_dist2 < best_dist2:
+                    best_projection = (new_s, index)
+                    best_dist2 = c_dist2
+                to_lanelet = self.lanelet_network.find_lanelet_by_id(grid.to_lanelet_id)
+                to_curve = to_lanelet.center_curve
+                to_curve_pt = lerp_curve(to_curve[grid.to_index.i], to_curve[grid.to_index.i+1], grid.to_index.t)
+                t_dist2 = (to_curve_pt.s- projections[grid.to_lanelet_id][0])**2 + projections[grid.to_lanelet_id][1]**2
+                if t_dist2 < best_dist2:
+                    best_projection = (new_s, index)
+                    best_dist2 = t_dist2
+                #print("grid {} c_dist2 {} t_dist2 {} cur_best {}".format(grid, c_dist2, t_dist2, self.grids[best_projection[1]]))
+            return best_projection
         if len(cands) == 1:
             grid = self.grids[cands[0]]
             from_lanelet = self.lanelet_network.find_lanelet_by_id(grid.from_lanelet_id)
@@ -97,6 +140,52 @@ class ScenarioWrapper:
                                                                                                            )
             return new_s, cands[0]
         else:
+            best_from = self.grids[cands[0]].from_lanelet_id
+            best_to = None
+            best_to_dist = float("inf")
+            # four cands
+            for index in cands:
+                grid = self.grids[index]
+                t = 1
+                while vehicle_id in self.obstacles[time_step-t]:
+                    if self.obstacles[time_step-t][vehicle_id].initial_state.posF.ind[1] == grid.from_lanelet_id:
+                        best_from = grid.from_lanelet_id
+                        break
+                    t += 1
+                to_lanelet = self.lanelet_network.find_lanelet_by_id(grid.to_lanelet_id)
+                to_curve = to_lanelet.center_curve
+                to_curve_pt = lerp_curve(to_curve[grid.to_index.i], to_curve[grid.to_index.i+1], grid.to_index.t)
+                distance2 = (to_curve_pt.pos.x-ego_vehicle.initial_state.posG.x)**2 + (to_curve_pt.pos.y-ego_vehicle.initial_state.posG.y)**2
+                if distance2 < best_to_dist:
+                    best_to = grid.to_lanelet_id
+                    best_to_dist = distance2
+            #print("best_from", best_from)
+            #print("best_to", best_to)
+            #print("cands", [self.grids[c] for c in cands])
+            for index in cands:
+                grid = self.grids[index]
+                if grid.from_lanelet_id == best_from and grid.to_lanelet_id == best_to:
+                    from_lanelet = self.lanelet_network.find_lanelet_by_id(grid.from_lanelet_id)
+                    from_curve = from_lanelet.center_curve
+                    from_curve_pt = lerp_curve(from_curve[grid.from_index.i], from_curve[grid.from_index.i+1], grid.from_index.t)
+                    if grid.from_lanelet_id == posF.ind[1]:
+                        new_s = posF.s - from_curve_pt.s
+                    else:
+                        new_s = posF.s + from_curve[-1].s - from_curve_pt.s
+                    return new_s, index
+            for index in cands:
+                grid = self.grids[index]
+                if grid.to_lanelet_id == best_to:
+                    from_lanelet = self.lanelet_network.find_lanelet_by_id(grid.from_lanelet_id)
+                    from_curve = from_lanelet.center_curve
+                    from_curve_pt = lerp_curve(from_curve[grid.from_index.i], from_curve[grid.from_index.i+1], grid.from_index.t)
+                    if grid.from_lanelet_id == posF.ind[1]:
+                        new_s = posF.s - from_curve_pt.s
+                    else:
+                        new_s = posF.s + from_curve[-1].s - from_curve_pt.s
+                    return new_s, index
+        '''
+        elif len(cands)==2:
             if self.grids[cands[0]].from_lanelet_id != self.grids[cands[1]].from_lanelet_id:
                 if vehicle_id in self.obstacles[time_step-1]:
                     if self.obstacles[time_step-1][vehicle_id].initial_state.posF.ind[1] == self.grids[cands[1]].from_lanelet_id:
@@ -117,7 +206,6 @@ class ScenarioWrapper:
                 return new_s, grid_index
             else:
                 grid1 = self.grids[cands[0]]
-
                 to_lanelet1 = self.lanelet_network.find_lanelet_by_id(grid1.to_lanelet_id)
                 to_curve1 = to_lanelet1.center_curve
                 to_curve_pt1 = lerp_curve(to_curve1[grid1.to_index.i], to_curve1[grid1.to_index.i+1], grid1.to_index.t)
@@ -149,10 +237,25 @@ class ScenarioWrapper:
                         new_s = posF.s + from_curve2[-1].s - from_curve_pt2.s
                     assert new_s >= 0.0
                     return new_s, cands[1]
-
-
-
-
+        '''
+    def locate_on_grid1(self, time_step, vehicle_id, initial_cands=None):
+        ego_vehicle = self.obstacles[time_step][vehicle_id]
+        ego_posG = ego_vehicle.initial_state.posG
+        best_dist2 = float('inf')
+        best_projection = None
+        if initial_cands is None:
+            initial_cands = np.arange(len(self.grids))
+        for index in initial_cands:
+            grid = self.grids[index]
+            best_point_dist2 = float('inf')
+            for pos in grid.pos_list:
+                dist2 = (pos.x-ego_posG.x)**2 + (pos.y-ego_posG.y)**2
+                if dist2 < best_point_dist2:
+                    best_point_dist2 = dist2
+            if best_point_dist2 < best_dist2:
+                best_dist2 = best_point_dist2
+                best_projection = index
+        return index
     def _get_cr_obstacles(time_step):
         obstacles = []
         for veh_id, obs in self.obstacles[time_step].items():
@@ -1129,9 +1232,12 @@ class ScenarioWrapper:
         ego_curve_index = self.obstacles[startframe][ego_id].initial_state.posF.ind[0]
         ego_lanelet_id = self.obstacles[startframe][ego_id].initial_state.posF.ind[1]
         ego_lanelet = self.lanelet_network.find_lanelet_by_id(ego_lanelet_id)
+
         # this is the center of everything
         cand_indexs = [(ego_curve_index, ego_lanelet_id)]
-        future_indexs = [(ego_curve_index, ego_lanelet_id, 0.0, "forward"), (ego_curve_index, ego_lanelet_id, 0.0, "backward")]
+        future_indexs = []
+        all_lanelets = set()
+        all_lanelets.add(ego_lanelet_id)
         #print("gaga", ego_lanelet_id)
         #future_indexs_backward = [(ego_curve_index, ego_lanelet_id, 0.0)]
         if ego_lanelet.adj_left is not None:
@@ -1139,6 +1245,7 @@ class ScenarioWrapper:
             left_lanelet = self.lanelet_network.find_lanelet_by_id(ego_lanelet.adj_left)
             future_indexs.append((left_ego_posF.ind[0], ego_lanelet.adj_left, 0.0, "forward"))
             future_indexs.append((left_ego_posF.ind[0], ego_lanelet.adj_left, 0.0, "backward"))
+            all_lanelets.add(ego_lanelet.adj_left)
             #future_indexs_backward.append((ego_curve_index, ego_lanelet.adj_left, 0.0))
             cand_indexs.append((left_ego_posF.ind[0], ego_lanelet.adj_left))
             if left_lanelet.adj_left is not None:
@@ -1146,126 +1253,283 @@ class ScenarioWrapper:
                 future_indexs.append((left_left_ego_posF.ind[0], left_lanelet.adj_left, 0.0, "forward"))
                 future_indexs.append((left_left_ego_posF.ind[0], left_lanelet.adj_left, 0.0, "backward"))
                 cand_indexs.append((left_left_ego_posF.ind[0], left_lanelet.adj_left))
+                all_lanelets.add(left_lanelet.adj_left)
 
         if ego_lanelet.adj_right is not None:
             right_ego_posF = Frenet(ego_posG.projF(self.lanelet_network, [ego_lanelet.adj_right]), self.lanelet_network)
             right_lanelet = self.lanelet_network.find_lanelet_by_id(ego_lanelet.adj_right)
-            future_indexs.append((right_ego_posF.ind[0], ego_lanelet.adj_right, 0.0, "forward"))
             future_indexs.append((right_ego_posF.ind[0], ego_lanelet.adj_right, 0.0, "backward"))
+            future_indexs.append((right_ego_posF.ind[0], ego_lanelet.adj_right, 0.0, "forward"))
+
+            all_lanelets.add(ego_lanelet.adj_right)
             #future_indexs_backward.append((ego_curve_index, ego_lanelet.adj_right, 0.0))
             cand_indexs.append((right_ego_posF.ind[0], ego_lanelet.adj_right))
             if right_lanelet.adj_right is not None:
                 right_right_ego_posF = Frenet(ego_posG.projF(self.lanelet_network, [right_lanelet.adj_right]), self.lanelet_network)
-                future_indexs.append((right_right_ego_posF.ind[0], right_lanelet.adj_right, 0.0, "forward"))
                 future_indexs.append((right_right_ego_posF.ind[0], right_lanelet.adj_right, 0.0, "backward"))
+                future_indexs.append((right_right_ego_posF.ind[0], right_lanelet.adj_right, 0.0, "forward"))
                 cand_indexs.append((right_right_ego_posF.ind[0], right_lanelet.adj_right))
+                all_lanelets.add(right_lanelet.adj_right)
+
+
+        future_indexs.append((ego_curve_index, ego_lanelet_id, 0.0, "backward"))
+        future_indexs.append((ego_curve_index, ego_lanelet_id, 0.0, "forward"))
 
         # forward and backward
         while len(future_indexs) > 0:
-            current_index, current_lanelet_id, current_disp, dir = future_indexs.pop(0)
+            current_index, current_lanelet_id, current_disp, dir = future_indexs.pop(-1)
             current_lanelet = self.lanelet_network.find_lanelet_by_id(current_lanelet_id)
             current_curve = current_lanelet.center_curve
             #print(len(current_curve), current_index.i, current_lanelet_id, dir, current_disp)
             current_curvePt = lerp_curve(current_curve[current_index.i], current_curve[current_index.i+1], current_index.t)
             distance2 = (current_curvePt.pos.x-ego_posG.x)**2 + (current_curvePt.pos.y-ego_posG.y)**2
-            if (dir == "forward" and current_disp + grid_length > max_disp_front) or (dir == "backward" and current_disp + grid_length > max_disp_rear) or distance2 > max_radius**2:
+            if (dir == "forward" and current_disp > max_disp_front) or (dir == "backward" and current_disp > max_disp_rear) or distance2 > max_radius**2:
+                #print("out", current_disp + grid_length > max_disp_front, current_disp + grid_length > max_disp_rear, distance2>max_radius**2)
                 continue
             elif current_disp != 0.0:
-                #print(dir, current_lanelet_id, current_index.i, current_disp, np.sqrt(distance2))
+                #print("in", dir, current_lanelet_id, current_index.i, current_disp, np.sqrt(distance2))
                 cand_indexs.append((current_index, current_lanelet_id))
             if dir == "forward":
                 if current_curvePt.s + grid_length > current_curve[-1].s:
-                    new_s = current_curvePt.s+grid_length-current_curve[-1].s
+                    ori_new_s = current_curvePt.s+grid_length-current_curve[-1].s
+                    next_lanes = []
                     for succ in current_lanelet.successor:
                         successor_lane = self.lanelet_network.find_lanelet_by_id(succ)
+                        new_index, _ = get_curve_index(CurveIndex(0, 0.0), successor_lane.center_curve, ori_new_s)
+                        if new_index.t > 1.0:
+                            for succ_succ in successor_lane.successor:
+                                if succ_succ not in all_lanelets:
+                                    next_lanes.append((succ_succ, ori_new_s-successor_lane.center_curve[-1].s, succ))
+                        elif succ not in all_lanelets:
+                            next_lanes.append((succ, ori_new_s, succ))
+                    for succ, new_s, ori_succ in next_lanes:
+                        successor_lane = self.lanelet_network.find_lanelet_by_id(succ)
+                        all_lanelets.add(succ)
                         new_index, _ = get_curve_index(CurveIndex(0, 0.0), successor_lane.center_curve, new_s)
-
                         future_indexs.append((new_index, succ, current_disp+grid_length, "forward"))
-                        if current_lanelet.adj_left is None and successor_lane.adj_left is not None:
+                        if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                            print("1 {}".format(future_indexs[-1]))
+                        if current_lanelet.adj_left is None and successor_lane.adj_left is not None and successor_lane.adj_left not in all_lanelets:
                             new_curvePt = lerp_curve(successor_lane.center_curve[new_index.i],
                                                      successor_lane.center_curve[new_index.i+1], new_index.t)
                             left_posF = Frenet(new_curvePt.pos.projF(self.lanelet_network, [successor_lane.adj_left]), self.lanelet_network)
                             future_indexs.append((left_posF.ind[0], successor_lane.adj_left, current_disp + grid_length, "forward"))
+                            if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                print("2 {}".format(future_indexs[-1]))
                             future_indexs.append((left_posF.ind[0], successor_lane.adj_left, 0.0, "backward"))
+                            all_lanelets.add(successor_lane.adj_left)
+                            if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                print("3 {}".format(future_indexs[-1]))
                             left_lanelet = self.lanelet_network.find_lanelet_by_id(successor_lane.adj_left)
-                            if left_lanelet.adj_left is not None:
+                            if left_lanelet.adj_left is not None and left_lanelet.adj_left not in all_lanelets:
+                                all_lanelets.add(left_lanelet.adj_left)
                                 left_left_posF = Frenet(new_curvePt.pos.projF(self.lanelet_network, [left_lanelet.adj_left]), self.lanelet_network)
                                 future_indexs.append((left_left_posF.ind[0], left_lanelet.adj_left, current_disp + grid_length, "forward"))
+                                if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                    print("4 {}".format(future_indexs[-1]))
                                 future_indexs.append((left_left_posF.ind[0], left_lanelet.adj_left, 0.0, "backward"))
+                                if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                    print("5 {}".format(future_indexs[-1]))
 
-                        if current_lanelet.adj_right is None and successor_lane.adj_right is not None:
+                        if current_lanelet.adj_right is None and successor_lane.adj_right is not None and successor_lane.adj_right not in all_lanelets:
                             new_curvePt = lerp_curve(successor_lane.center_curve[new_index.i],
                                                      successor_lane.center_curve[new_index.i+1], new_index.t)
                             right_posF = Frenet(new_curvePt.pos.projF(self.lanelet_network, [successor_lane.adj_right]), self.lanelet_network)
                             future_indexs.append((right_posF.ind[0], successor_lane.adj_right, current_disp + grid_length, "forward"))
+                            if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                print("6 {}".format(future_indexs[-1]))
                             future_indexs.append((right_posF.ind[0], successor_lane.adj_right, 0.0, "backward"))
+                            all_lanelets.add(successor_lane.adj_right)
+                            if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                print("7 {}".format(future_indexs[-1]))
                             right_lanelet = self.lanelet_network.find_lanelet_by_id(successor_lane.adj_right)
-                            if right_lanelet.adj_right is not None:
+                            if right_lanelet.adj_right is not None and right_lanelet.adj_right not in all_lanelets:
+                                all_lanelets.add(right_lanelet.adj_right)
                                 right_right_posF = Frenet(new_curvePt.pos.projF(self.lanelet_network, [right_lanelet.adj_right]), self.lanelet_network)
                                 future_indexs.append((right_right_posF.ind[0], right_lanelet.adj_right, current_disp + grid_length, "forward"))
+                                if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                    print("8 {}".format(future_indexs[-1]))
                                 future_indexs.append((right_right_posF.ind[0], right_lanelet.adj_right, 0.0, "backward"))
-
+                                if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                    print("9 {}".format(future_indexs[-1]))
                         if len(successor_lane.predecessor) > 1: # there exists a conflict lane
                             for pred in successor_lane.predecessor:
-                                if pred != current_lanelet_id:
+                                if (succ == ori_succ and pred != current_lanelet_id and pred not in all_lanelets) or (succ != ori_succ and pred != ori_succ and pred not in all_lanelets):
                                     conflict_lanelet = self.lanelet_network.find_lanelet_by_id(pred)
                                     conflict_new_s = conflict_lanelet.center_curve[-1].s+new_s-grid_length
-                                    conflict_new_index,_ = get_curve_index(CurveIndex(0,0.0), conflict_lanelet.center_curve, conflict_new_s)
-                                    future_indexs.append((conflict_new_index, pred, 10., "backward"))
-                                    #if current_lanelet.adj_left is None and conflict_lanelet.adj_left is not None:
-                                    #    future_indexs.append((conflict_new_index, conflict_lanelet.adj_left, 10., "backward"))
-                                    #if current_lanelet.adj_right is None and conflict_lanelet.adj_right is not None:
-                                    #    future_indexs.append((conflict_new_index, conflict_lanelet.adj_right, 10., "backward"))
+                                    if conflict_new_s < 0:
+                                        for con_pred in conflict_lanelet.predecessor:
+                                            if con_pred not in all_lanelets:
+                                                pred_conflict_lanelet = self.lanelet_network.find_lanelet_by_id(con_pred)
+                                                pred_conflict_new_s = conflict_new_s + pred_conflict_lanelet.center_curve[-1].s
+                                                conflict_new_index,_ = get_curve_index(CurveIndex(0,0.0), pred_conflict_lanelet.center_curve, pred_conflict_new_s)
+                                                future_indexs.append((conflict_new_index, con_pred, 5., "backward"))
+                                                if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                                    print("11.0 {}".format(future_indexs[-1]))
+                                                all_lanelets.add(con_pred)
+                                    else:
+                                        conflict_new_index,_ = get_curve_index(CurveIndex(0,0.0), conflict_lanelet.center_curve, conflict_new_s)
+                                        future_indexs.append((conflict_new_index, pred, 5., "backward"))
+                                        all_lanelets.add(pred)
+                                        if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                            print("10 {}".format(future_indexs[-1]))
+                                            print(pred, ori_succ, succ, new_s, grid_length)
+                        if succ != ori_succ:
+                            ori_succ_lane = self.lanelet_network.find_lanelet_by_id(ori_succ)
+                            if len(ori_succ_lane.predecessor) > 1:
+                                for pred in ori_succ_lane.predecessor:
+                                    if pred != current_lanelet_id and pred not in all_lanelets:
+                                        conflict_lanelet = self.lanelet_network.find_lanelet_by_id(pred)
+                                        conflict_new_s = np.maximum(conflict_lanelet.center_curve[-1].s+new_s+ori_succ_lane.center_curve[-1].s-grid_length, 0.0)
+                                        conflict_new_index,_ = get_curve_index(CurveIndex(0,0.0), conflict_lanelet.center_curve, conflict_new_s)
+                                        future_indexs.append((conflict_new_index, pred, 5., "backward"))
+                                        all_lanelets.add(pred)
+
+
 
                 else:
                     new_index, _ = get_curve_index(current_index, current_curve, grid_length)
                     future_indexs.append((new_index, current_lanelet_id, current_disp + grid_length, "forward"))
+                    if future_indexs[-1][0].t >=1.0:
+                        print("11 {}".format(future_indexs[-1]))
             else:
                 if current_curvePt.s - grid_length < 0.0:
+                    next_lanes = []
                     for pred in current_lanelet.predecessor:
                         predecessor_lane = self.lanelet_network.find_lanelet_by_id(pred)
-                        new_s = predecessor_lane.center_curve[-1].s + current_curvePt.s - grid_length
+                        if predecessor_lane.center_curve[-1].s + current_curvePt.s - grid_length < 0:
+                            for pred_pred in predecessor_lane.predecessor:
+                                if pred_pred not in all_lanelets:
+                                    pred_pred_lane = self.lanelet_network.find_lanelet_by_id(pred_pred)
+                                    next_lanes.append((pred_pred, pred_pred_lane.center_curve[-1].s+predecessor_lane.center_curve[-1].s+current_curvePt.s-grid_length, pred))
+                        elif pred not in all_lanelets:
+                            next_lanes.append((pred, predecessor_lane.center_curve[-1].s+current_curvePt.s-grid_length, pred))
+
+                    for pred, new_s, ori_pred in next_lanes:
+                        predecessor_lane = self.lanelet_network.find_lanelet_by_id(pred)
+                        all_lanelets.add(pred)
+                        #new_s = predecessor_lane.center_curve[-1].s + current_curvePt.s - grid_length
                         new_index, _ = get_curve_index(CurveIndex(0,0.0), predecessor_lane.center_curve, new_s)
                         future_indexs.append((new_index, pred, current_disp + grid_length, "backward"))
-                        if current_lanelet.adj_left is None and predecessor_lane.adj_left is not None:
+                        if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                            print("12 {}".format(future_indexs[-1]))
+                        if current_lanelet.adj_left is None and predecessor_lane.adj_left is not None and predecessor_lane.adj_left not in all_lanelets:
                             new_curvePt = lerp_curve(predecessor_lane.center_curve[new_index.i],
                                                      predecessor_lane.center_curve[new_index.i+1], new_index.t)
                             left_posF = Frenet(new_curvePt.pos.projF(self.lanelet_network, [predecessor_lane.adj_left]), self.lanelet_network)
                             future_indexs.append((left_posF.ind[0], predecessor_lane.adj_left, current_disp + grid_length, "backward"))
+                            if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                print("13 {}".format(future_indexs[-1]))
                             future_indexs.append((left_posF.ind[0], predecessor_lane.adj_left, 0.0, "forward"))
+                            all_lanelets.add(predecessor_lane.adj_left)
+                            if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                print("14 {}".format(future_indexs[-1]))
                             left_lanelet = self.lanelet_network.find_lanelet_by_id(predecessor_lane.adj_left)
-                            if left_lanelet.adj_left is not None:
+                            if left_lanelet.adj_left is not None and left_lanelet.adj_left not in all_lanelets:
+                                all_lanelets.add(left_lanelet.adj_left)
                                 left_left_posF = Frenet(new_curvePt.pos.projF(self.lanelet_network, [left_lanelet.adj_left]), self.lanelet_network)
                                 future_indexs.append((left_left_posF.ind[0], left_lanelet.adj_left, current_disp + grid_length, "backward"))
+                                if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                    print("15 {}".format(future_indexs[-1]))
                                 future_indexs.append((left_left_posF.ind[0], left_lanelet.adj_left, 0.0, "forward"))
-
-                        if current_lanelet.adj_right is None and predecessor_lane.adj_right is not None:
+                                if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                    print("16 {}".format(future_indexs[-1]))
+                        if current_lanelet.adj_right is None and predecessor_lane.adj_right is not None and predecessor_lane.adj_right not in all_lanelets:
                             new_curvePt = lerp_curve(predecessor_lane.center_curve[new_index.i],
                                                      predecessor_lane.center_curve[new_index.i+1], new_index.t)
                             right_posF = Frenet(new_curvePt.pos.projF(self.lanelet_network, [predecessor_lane.adj_right]), self.lanelet_network)
                             future_indexs.append((right_posF.ind[0], predecessor_lane.adj_right, current_disp + grid_length, "backward"))
+                            if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                print("17 {}".format(future_indexs[-1]))
                             future_indexs.append((right_posF.ind[0], predecessor_lane.adj_right, 0.0, "forward"))
+                            all_lanelets.add(predecessor_lane.adj_right)
+                            if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                print("18 {}".format(future_indexs[-1]))
                             right_lanelet = self.lanelet_network.find_lanelet_by_id(predecessor_lane.adj_right)
-                            if right_lanelet.adj_right is not None:
+                            if right_lanelet.adj_right is not None and right_lanelet.adj_right not in all_lanelets:
+                                all_lanelets.add(right_lanelet.adj_right)
                                 right_right_posF = Frenet(new_curvePt.pos.projF(self.lanelet_network, [right_lanelet.adj_right]), self.lanelet_network)
                                 future_indexs.append((right_right_posF.ind[0], right_lanelet.adj_right, current_disp + grid_length, "backward"))
+                                if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                    print("19 {}".format(future_indexs[-1]))
                                 future_indexs.append((right_right_posF.ind[0], right_lanelet.adj_right, 0.0, "forward"))
-
+                                if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                    print("20 {}".format(future_indexs[-1]))
                         if len(predecessor_lane.successor) > 1: # conflict_lane
                             for succ in predecessor_lane.successor:
-                                if succ != current_lanelet_id:
-                                    conflict_lanelet = self.lanelet_network.find_lanelet_by_id(succ)
-                                    conflict_new_s = current_curvePt.s
-                                    conflict_new_index,_ = get_curve_index(CurveIndex(0,0.0), conflict_lanelet.center_curve, conflict_new_s)
-                                    future_indexs.append((conflict_new_index, succ, 10., "forward"))
+                                if pred == ori_pred:
+                                    if succ != current_lanelet_id and succ not in all_lanelets:
+                                        conflict_lanelet = self.lanelet_network.find_lanelet_by_id(succ)
+                                        conflict_new_s = current_curvePt.s
+                                        #TODO
+                                        if conflict_new_s > conflict_lanelet.center_curve[-1].s:
+                                            #assert len(conflict_lanelet.successor) == 1, "conflict {}".format(succ)
+                                            for con_succ in conflict_lanelet.successor:
+                                                if con_succ not in all_lanelets:
+                                                    succ_conflict_new_s = conflict_new_s - conflict_lanelet.center_curve[-1].s
+                                                    succ_conflict_lanelet = self.lanelet_network.find_lanelet_by_id(con_succ)
+                                                    conflict_new_index,_ = get_curve_index(CurveIndex(0,0.0), succ_conflict_lanelet.center_curve, succ_conflict_new_s)
+                                                    future_indexs.append((conflict_new_index, con_succ, 5., "forward"))
+                                                    if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                                        print("21.0 {}".format(future_indexs[-1]))
+                                                    all_lanelets.add(con_succ)
+
+                                        else:
+                                            conflict_new_index,_ = get_curve_index(CurveIndex(0,0.0), conflict_lanelet.center_curve, conflict_new_s)
+                                            future_indexs.append((conflict_new_index, succ, 5., "forward"))
+                                            if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                                print("21 {}".format(future_indexs[-1]))
+                                            all_lanelets.add(succ)
+
+                                else:
+                                    if succ != ori_pred and succ not in all_lanelets:
+                                        conflict_lanelet = self.lanelet_network.find_lanelet_by_id(succ)
+                                        ori_pred_lane = self.lanelet_network.find_lanelet_by_id(ori_pred)
+                                        conflict_new_s = current_curvePt.s + ori_pred_lane.center_curve[-1].s
+                                        #TODO
+                                        if conflict_new_s > conflict_lanelet.center_curve[-1].s:
+                                            #print(conflict_new_s, conflict_lanelet.center_curve[-1].s)
+                                            #assert len(conflict_lanelet.successor) == 1, "conflict {}".format(succ)
+                                            for con_succ in conflict_lanelet.successor:
+                                                if con_succ not in all_lanelets:
+                                                    succ_conflict_new_s = conflict_new_s - conflict_lanelet.center_curve[-1].s
+                                                    succ_conflict_lanelet = self.lanelet_network.find_lanelet_by_id(con_succ)
+                                                    conflict_new_index,_ = get_curve_index(CurveIndex(0,0.0), succ_conflict_lanelet.center_curve, succ_conflict_new_s)
+                                                    future_indexs.append((conflict_new_index, con_succ, 5., "forward"))
+                                                    if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                                        print("22.0 {}".format(future_indexs[-1]))
+                                                        print(conflict_new_s)
+                                                    all_lanelets.add(con_succ)
+
+                                        else:
+                                            conflict_new_index,_ = get_curve_index(CurveIndex(0,0.0), conflict_lanelet.center_curve, conflict_new_s)
+                                            future_indexs.append((conflict_new_index, succ, 5., "forward"))
+                                            if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                                print("22 {}".format(future_indexs[-1]))
+                                            all_lanelets.add(succ)
                                     #if current_lanelet.adj_left is None and conflict_lanelet.adj_left is not None:
                                     #    future_indexs.append((conflict_new_index, conflict_lanelet.adj_left, 10., "forward"))
                                     #if current_lanelet.adj_right is None and conflict_lanelet.adj_right is not None:
                                     #    future_indexs.append((conflict_new_index, conflict_lanelet.adj_right, 10., "forward"))
+                        if pred != ori_pred:
+                            ori_pred_lane = self.lanelet_network.find_lanelet_by_id(ori_pred)
+                            if len(ori_pred_lane.successor) > 1:
+                                for succ in ori_pred_lane.successor:
+                                    if succ != current_lanelet_id and succ not in all_lanelets:
+                                        conflict_lanelet = self.lanelet_network.find_lanelet_by_id(succ)
+                                        ori_pred_lane = self.lanelet_network.find_lanelet_by_id(ori_pred)
+                                        conflict_new_s = np.minimum(current_curvePt.s + ori_pred_lane.center_curve[-1].s, conflict_lanelet.center_curve[-1].s)
+                                        conflict_new_index,_ = get_curve_index(CurveIndex(0,0.0), conflict_lanelet.center_curve, conflict_new_s)
+                                        future_indexs.append((conflict_new_index, succ, 5., "forward"))
+                                        if future_indexs[-1][0].t >1.0 or future_indexs[-1][0].t < 0.0:
+                                            print("23 {}".format(future_indexs[-1]))
+                                        all_lanelets.add(succ)
+
                 else:
                     new_index, _ = get_curve_index(current_index, current_curve, -grid_length)
                     future_indexs.append((new_index,current_lanelet_id, current_disp + grid_length, "backward"))
-
+                    if future_indexs[-1][0].t > 1.0 or future_indexs[-1][0].t < 0.0:
+                        print("24 {}".format(future_indexs[-1]))
 
         # backward
         '''
@@ -1345,7 +1609,7 @@ class ScenarioWrapper:
                                       center_index=center_index,
                                       center_lanelet_id=center_lanelet_id,
                                       from_disp=from_disp,
-                                      to_disp=to_disp))
+                                      to_disp=to_disp, lanelet_network=self.lanelet_network))
         return grids
 
 class CoreFeatureExtractor:
@@ -1382,8 +1646,9 @@ class CoreFeatureExtractor:
                               "target_velocity_d":11,
                               "target_grid_index":12
                               }
-    def set_step_length(self, step_length):
+    def set_step_length_and_maneuver_horizon(self, step_length, horizon):
         self.step_length = step_length
+        self.horizon = horizon
 
     def get_delta(self, cr_scenario, vehicle_id, startframe, step):
         ego_vehicle = cr_scenario.obstacles[startframe][vehicle_id]
@@ -1398,7 +1663,6 @@ class CoreFeatureExtractor:
         target_state = cr_scenario.obstacles[startframe+step][vehicle_id].initial_state
         target_posF = target_state.posF
         target_lane = cr_scenario.lanelet_network.find_lanelet_by_id(target_posF.ind[1])
-        _, target_grid_index = cr_scenario.locate_on_grid(startframe+step, vehicle_id)
         origin_target_lanelet_id = target_lane.lanelet_id
         if target_lane.adj_right is not None:
             target_lane = cr_scenario.lanelet_network.find_lanelet_by_id(target_lane.adj_right)
@@ -1452,7 +1716,7 @@ class CoreFeatureExtractor:
                 delta_d = posF_adjust.d - current_posF.d
                 #target_lanelet_id = origin_target_lanelet_id
 
-        return delta_s, delta_d, target_grid_index
+        return delta_s, delta_d
     def get_features(self, cr_scenario, vehicle_id, startframe):
         ego_vehicle = cr_scenario.obstacles[startframe][vehicle_id]
         grid_s, grid_index = cr_scenario.locate_on_grid(startframe, vehicle_id)
@@ -1465,11 +1729,30 @@ class CoreFeatureExtractor:
         self.features[self.feature_index["length"]] = ego_vehicle.obstacle_shape.length
         self.features[self.feature_index["width"]] = ego_vehicle.obstacle_shape.width
         delta_step = int(self.step_length/cr_scenario.dt) # should be 10 if dt = 0.1
+        horizon_step = int(self.horizon/cr_scenario.dt)
+        if vehicle_id in cr_scenario.obstacles[startframe+horizon_step].keys():
+            delta_s,_ = self.get_delta(cr_scenario, vehicle_id, startframe, horizon_step)
+            if delta_s >= 0:
+                _, self.features[self.feature_index["target_grid_index"]] = cr_scenario.locate_on_grid(startframe+horizon_step, vehicle_id)
+            else:
+                self.features[self.feature_index["target_grid_index"]] = grid_index
+        elif vehicle_id in cr_scenario.obstacles[startframe+1].keys():
+            i = 1
+            while True:
+                if vehicle_id in cr_scenario.obstacles[startframe+horizon_step-i].keys():
+                    delta_s,_ = self.get_delta(cr_scenario, vehicle_id, startframe, horizon_step-i)
+                    if delta_s >= 0:
+                        _, self.features[self.feature_index["target_grid_index"]] = cr_scenario.locate_on_grid(startframe+horizon_step-i, vehicle_id)
+                    else:
+                        self.features[self.feature_index["target_grid_index"]] = grid_index
+                    break
+                i += 1
+        else:
+            self.features[self.feature_index["target_grid_index"]] = grid_index
 
         if vehicle_id in cr_scenario.obstacles[startframe+delta_step].keys():
             self.features[self.feature_index["target_delta_s"]],\
-            self.features[self.feature_index["target_delta_d"]],\
-            self.features[self.feature_index["target_grid_index"]] = self.get_delta(cr_scenario, vehicle_id, startframe, delta_step)
+            self.features[self.feature_index["target_delta_d"]] = self.get_delta(cr_scenario, vehicle_id, startframe, delta_step)
             target_state = cr_scenario.obstacles[startframe+delta_step][vehicle_id].initial_state
             self.features[self.feature_index["target_velocity_s"]] = np.cos(target_state.posF.phi)*target_state.velocity
             self.features[self.feature_index["target_velocity_d"]] = np.sin(target_state.posF.phi)*target_state.velocity
@@ -1479,8 +1762,7 @@ class CoreFeatureExtractor:
             while True:
                 if vehicle_id in cr_scenario.obstacles[startframe+delta_step-i].keys():
                     delta_s,\
-                    delta_d,\
-                    self.features[self.feature_index["target_grid_index"]] = self.get_delta(cr_scenario, vehicle_id, startframe, delta_step-i)
+                    delta_d = self.get_delta(cr_scenario, vehicle_id, startframe, delta_step-i)
                     self.features[self.feature_index["target_delta_s"]] = delta_s*delta_step/(delta_step-i)
                     self.features[self.feature_index["target_delta_d"]] = delta_d*delta_step/(delta_step-i)
 
@@ -1494,14 +1776,13 @@ class CoreFeatureExtractor:
             i = 0
             while True:
                 if vehicle_id in cr_scenario.obstacles[startframe-delta_step+i].keys():
-                    delta_s,delta_d,_ = self.get_delta(cr_scenario, vehicle_id, startframe-delta_step+i, delta_step-i)
+                    delta_s,delta_d = self.get_delta(cr_scenario, vehicle_id, startframe-delta_step+i, delta_step-i)
                     self.features[self.feature_index["target_delta_s"]] = delta_s*delta_step/(delta_step-i)
                     self.features[self.feature_index["target_delta_d"]] = delta_d*delta_step/(delta_step-i)
 
                     target_state = cr_scenario.obstacles[startframe-delta_step+i][vehicle_id].initial_state
                     self.features[self.feature_index["target_velocity_s"]] = np.cos(target_state.posF.phi)*target_state.velocity
                     self.features[self.feature_index["target_velocity_d"]] = np.sin(target_state.posF.phi)*target_state.velocity
-                    self.features[self.feature_index["target_grid_index"]] = grid_index
 
                     break
                 i += 1
@@ -1511,54 +1792,35 @@ class CoreFeatureExtractor:
 
 class CoreFeatureExtractor1:
     def __init__(self):
-        self.num_features = 30
+        self.num_features = 10
         self.features = np.zeros(self.num_features, dtype=np.float32)
 
         self.feature_info = { "egoid":{"high":3000, "low":0},
                               "relative_offset":{"high":2.,    "low":-2.},
-                              "relative_displa":{"high":100.,    "low": 0.},
                               "velocity_s":{"high":40.,    "low":0.},
                               "velocity_d":{"high":40.,    "low":0.},
-                              "lanelet_id" : {"high":None, "low":None},
                               "length":{"high":30.,    "low":2.},
                               "width":{"high":3.,     "low":.9},
-                              "target_delta_s_1":{"high":40, "low":0},
-                              "target_delta_d_1":{"high":40, "low":0},
-                              "target_velocity_s_1":{"high":40, "low":0},
-                              "target_velocity_d_1":{"high":40, "low":0},
-                              "target_lanelet_id_1":{"high":None, "low":None},
-                              "target_delta_s_2":{"high":40, "low":0},
-                              "target_delta_d_2":{"high":40, "low":0},
-                              "target_velocity_s_2":{"high":40, "low":0},
-                              "target_velocity_d_2":{"high":40, "low":0},
-                              "target_lanelet_id_2":{"high":None, "low":None},
-                              "shape_x":{"high":10., "low":-10.},
-                              "shape_y":{"high":10., "low":-10.},
-                              "shape_th":{"high":0.5*np.pi, "low":-0.5*np.pi}
+                              "target_delta_s":{"high":40, "low":0},
+                              "target_delta_d":{"high":40, "low":0},
+                              "target_velocity_s":{"high":40, "low":0},
+                              "target_velocity_d":{"high":40, "low":0},
                               }
 
         self.feature_index = {"egoid":0,
                               "relative_offset":1,
-                              "relative_displa":2,
-                              "velocity_s":3,
-                              "velocity_d":4,
-                              "lanelet_id":5,
-                              "length":6,
-                              "width":7,
-                              "target_delta_s_1":8,
-                              "target_delta_d_1":9,
-                              "target_velocity_s_1":10,
-                              "target_velocity_d_1":11,
-                              "target_lanelet_id_1":12,
-                              "target_delta_s_2":13,
-                              "target_delta_d_2":14,
-                              "target_velocity_s_2":15,
-                              "target_velocity_d_2":16,
-                              "target_lanelet_id_2":17,
-                              "shape_x":[18,19,20,21],
-                              "shape_y":[22,23,24,25],
-                              "shape_th":[26,27,28,29],
+                              "velocity_s":2,
+                              "velocity_d":3,
+                              "length":4,
+                              "width":5,
+                              "target_delta_s":6,
+                              "target_delta_d":7,
+                              "target_velocity_s":8,
+                              "target_velocity_d":9,
                               }
+    def set_step_length_and_maneuver_horizon(self, step_length, horizon):
+        self.step_length = step_length
+        self.horizon = horizon
 
     def get_delta(self, cr_scenario, vehicle_id, startframe, step):
         ego_vehicle = cr_scenario.obstacles[startframe][vehicle_id]
@@ -1581,11 +1843,7 @@ class CoreFeatureExtractor1:
         if target_posF.ind[1] == current_posF.ind[1]:
             delta_s = target_posF.s - current_posF.s
             delta_d = target_posF.d - current_posF.d
-            #if origin_current_lanelet_id == current_posF.ind[1]:
-            #    target_lanelet_id = target_posF.ind[1]
-            #else:
-            target_lanelet_id = origin_target_lanelet_id
-            #target_lanelet_id = target_posF.ind[1]
+            #target_lanelet_id = origin_target_lanelet_id
         else:
             posG = target_state.get_posG()
             posF_adjust = Frenet(posG.projF(cr_scenario.lanelet_network, [current_posF.ind[1]]), cr_scenario.lanelet_network)
@@ -1605,11 +1863,7 @@ class CoreFeatureExtractor1:
                     if this_cand == target_posF.ind[1]:
                         delta_s = target_posF.s + this_dist_s - current_posF.s
                         delta_d = target_posF.d - current_posF.d
-                        #if origin_current_lanelet_id == current_posF.ind[1]:
-                        #    target_lanelet_id = target_posF.ind[1]
-                        #else:
-                        target_lanelet_id = origin_target_lanelet_id
-                        #target_lanelet_id = target_posF.ind[1]
+                        #target_lanelet_id = origin_target_lanelet_id
                         break
                     else:
                         this_lane = cr_scenario.lanelet_network.find_lanelet_by_id(this_cand)
@@ -1623,189 +1877,68 @@ class CoreFeatureExtractor1:
                             if delta_d is None:
                                 delta_s = posF_adjust.s + this_dist_s - current_posF.s
                                 delta_d = posF_adjust.d - current_posF.d
-                                target_lanelet_id = origin_target_lanelet_id
-                                #target_lanelet_id = posF_adjust.ind[1]
+                                #target_lanelet_id = origin_target_lanelet_id
+
                             elif np.abs(posF_adjust.d - current_posF.d) < np.abs(delta_d):
                                 delta_s = posF_adjust.s + this_dist_s - current_posF.s
                                 delta_d = posF_adjust.d - current_posF.d
-                                target_lanelet_id = origin_target_lanelet_id
-                                #target_lanelet_id = posF_adjust.ind[1]
-                '''
-                for succ_id in current_lane.successor:
-                    cands.append(succ_id)
-                    if succ_id == target_posF.ind[1]:
-                        delta_s = target_posF.s + current_lane.center_curve[-1].s - current_posF.s
-                        delta_d = target_posF.d - current_posF.d
-                        target_lanelet_id = target_posF.ind[1]
-                        break
-                else:
-                    posF_adjust = Frenet(posG.projF(cr_scenario.lanelet_network, cands), cr_scenario.lanelet_network)
-                    delta_s = posF_adjust.s + current_lane.center_curve[-1].s - current_posF.s
-                    delta_d = posF_adjust.d - current_posF.d
-                    target_lanelet_id = posF_adjust.ind[1]
-                '''
+                                #target_lanelet_id = origin_target_lanelet_id
             else:
                 delta_s = posF_adjust.s - current_posF.s
                 delta_d = posF_adjust.d - current_posF.d
-                target_lanelet_id = origin_target_lanelet_id
-                #if target_posF.ind[1] == current_lane.adj_left or target_posF.ind[1] == current_lane.adj_right:
-                #    target_lanelet_id = target_posF.ind[1]
-                #else:
-                #    target_lanelet_id = current_posF.ind[1]
-        return delta_s, delta_d, target_lanelet_id
+                #target_lanelet_id = origin_target_lanelet_id
 
+        return delta_s, delta_d
     def get_features(self, cr_scenario, vehicle_id, startframe):
         ego_vehicle = cr_scenario.obstacles[startframe][vehicle_id]
         self.features[self.feature_index["egoid"]] = vehicle_id
         self.features[self.feature_index["relative_offset"]] = ego_vehicle.initial_state.posF.d
-        self.features[self.feature_index["relative_displa"]] = ego_vehicle.initial_state.posF.s
-
         self.features[self.feature_index["velocity_s"]] = np.cos(ego_vehicle.initial_state.posF.phi)*ego_vehicle.initial_state.velocity
         self.features[self.feature_index["velocity_d"]] = np.sin(ego_vehicle.initial_state.posF.phi)*ego_vehicle.initial_state.velocity
-        self.features[self.feature_index["lanelet_id"]] = ego_vehicle.initial_state.posF.ind[1]
-
         self.features[self.feature_index["length"]] = ego_vehicle.obstacle_shape.length
         self.features[self.feature_index["width"]] = ego_vehicle.obstacle_shape.width
-        delta_step_1 = int(1/cr_scenario.dt) # should be 10 if dt = 0.1
-        if vehicle_id in cr_scenario.obstacles[startframe+delta_step_1].keys():
-            self.features[self.feature_index["target_delta_s_1"]],self.features[self.feature_index["target_delta_d_1"]],self.features[self.feature_index["target_lanelet_id_1"]] = self.get_delta(cr_scenario, vehicle_id, startframe, delta_step_1)
-            target_state = cr_scenario.obstacles[startframe+delta_step_1][vehicle_id].initial_state
-            self.features[self.feature_index["target_velocity_s_1"]] = np.cos(target_state.posF.phi)*target_state.velocity
-            self.features[self.feature_index["target_velocity_d_1"]] = np.sin(target_state.posF.phi)*target_state.velocity
-
-
-        elif vehicle_id in cr_scenario.obstacles[startframe+1].keys():
-            i = 1
-            while True:
-                if vehicle_id in cr_scenario.obstacles[startframe+delta_step_1-i].keys():
-                    delta_s,delta_d, self.features[self.feature_index["target_lanelet_id_1"]] = self.get_delta(cr_scenario, vehicle_id, startframe, delta_step_1-i)
-                    self.features[self.feature_index["target_delta_s_1"]] = delta_s*delta_step_1/(delta_step_1-i)
-                    self.features[self.feature_index["target_delta_d_1"]] = delta_d*delta_step_1/(delta_step_1-i)
-
-                    target_state = cr_scenario.obstacles[startframe+delta_step_1-i][vehicle_id].initial_state
-                    self.features[self.feature_index["target_velocity_s_1"]] = np.cos(target_state.posF.phi)*target_state.velocity
-                    self.features[self.feature_index["target_velocity_d_1"]] = np.sin(target_state.posF.phi)*target_state.velocity
-
-
-                    break
-                i += 1
-            assert(i < delta_step_1)
-        else:
-            i = 0
-            while True:
-                if vehicle_id in cr_scenario.obstacles[startframe-delta_step_1+i].keys():
-                    delta_s,delta_d,_ = self.get_delta(cr_scenario, vehicle_id, startframe-delta_step_1+i, delta_step_1-i)
-                    self.features[self.feature_index["target_delta_s_1"]] = delta_s*delta_step_1/(delta_step_1-i)
-                    self.features[self.feature_index["target_delta_d_1"]] = delta_d*delta_step_1/(delta_step_1-i)
-
-                    target_state = cr_scenario.obstacles[startframe-delta_step_1+i][vehicle_id].initial_state
-                    self.features[self.feature_index["target_velocity_s_1"]] = np.cos(target_state.posF.phi)*target_state.velocity
-                    self.features[self.feature_index["target_velocity_d_1"]] = np.sin(target_state.posF.phi)*target_state.velocity
-
-                    self.features[self.feature_index["target_lanelet_id_1"]] = ego_vehicle.initial_state.posF.ind[1]
-
-                    break
-                i += 1
-            assert(i < delta_step_1)
-
-        delta_step_2 = int(2/cr_scenario.dt) # should be 10 if dt = 0.1
-        if vehicle_id in cr_scenario.obstacles[startframe+delta_step_2].keys():
-            self.features[self.feature_index["target_delta_s_2"]],self.features[self.feature_index["target_delta_d_2"]],self.features[self.feature_index["target_lanelet_id_2"]] = self.get_delta(cr_scenario, vehicle_id, startframe, delta_step_2)
-            target_state = cr_scenario.obstacles[startframe+delta_step_2][vehicle_id].initial_state
-            self.features[self.feature_index["target_velocity_s_2"]] = np.cos(target_state.posF.phi)*target_state.velocity
-            self.features[self.feature_index["target_velocity_d_2"]] = np.sin(target_state.posF.phi)*target_state.velocity
-
+        delta_step = int(self.step_length/cr_scenario.dt) # should be 10 if dt = 0.1
+        #horizon_step = int(self.horizon/cr_scenario.dt)
+        if vehicle_id in cr_scenario.obstacles[startframe+delta_step].keys():
+            self.features[self.feature_index["target_delta_s"]],\
+            self.features[self.feature_index["target_delta_d"]] = self.get_delta(cr_scenario, vehicle_id, startframe, delta_step)
+            target_state = cr_scenario.obstacles[startframe+delta_step][vehicle_id].initial_state
+            self.features[self.feature_index["target_velocity_s"]] = np.cos(target_state.posF.phi)*target_state.velocity
+            self.features[self.feature_index["target_velocity_d"]] = np.sin(target_state.posF.phi)*target_state.velocity
 
         elif vehicle_id in cr_scenario.obstacles[startframe+1].keys():
             i = 1
             while True:
-                if vehicle_id in cr_scenario.obstacles[startframe+delta_step_2-i].keys():
-                    delta_s, delta_d, self.features[self.feature_index["target_lanelet_id_2"]] = self.get_delta(cr_scenario, vehicle_id, startframe, delta_step_2-i)
-                    self.features[self.feature_index["target_delta_s_2"]] = delta_s*delta_step_2/(delta_step_2-i)
-                    self.features[self.feature_index["target_delta_d_2"]] = delta_d*delta_step_2/(delta_step_2-i)
+                if vehicle_id in cr_scenario.obstacles[startframe+delta_step-i].keys():
+                    delta_s,\
+                    delta_d = self.get_delta(cr_scenario, vehicle_id, startframe, delta_step-i)
+                    self.features[self.feature_index["target_delta_s"]] = delta_s*delta_step/(delta_step-i)
+                    self.features[self.feature_index["target_delta_d"]] = delta_d*delta_step/(delta_step-i)
 
-                    target_state = cr_scenario.obstacles[startframe+delta_step_2-i][vehicle_id].initial_state
-                    self.features[self.feature_index["target_velocity_s_2"]] = np.cos(target_state.posF.phi)*target_state.velocity
-                    self.features[self.feature_index["target_velocity_d_2"]] = np.sin(target_state.posF.phi)*target_state.velocity
-
-
+                    target_state = cr_scenario.obstacles[startframe+delta_step-i][vehicle_id].initial_state
+                    self.features[self.feature_index["target_velocity_s"]] = np.cos(target_state.posF.phi)*target_state.velocity
+                    self.features[self.feature_index["target_velocity_d"]] = np.sin(target_state.posF.phi)*target_state.velocity
                     break
                 i += 1
-            assert(i < delta_step_2)
+            assert(i < delta_step)
         else:
             i = 0
             while True:
-                if vehicle_id in cr_scenario.obstacles[startframe-delta_step_2+i].keys():
-                    delta_s,delta_d,_ = self.get_delta(cr_scenario, vehicle_id, startframe-delta_step_2+i, delta_step_2-i)
-                    self.features[self.feature_index["target_delta_s_2"]] = delta_s*delta_step_2/(delta_step_2-i)
-                    self.features[self.feature_index["target_delta_d_2"]] = delta_d*delta_step_2/(delta_step_2-i)
+                if vehicle_id in cr_scenario.obstacles[startframe-delta_step+i].keys():
+                    delta_s,delta_d = self.get_delta(cr_scenario, vehicle_id, startframe-delta_step+i, delta_step-i)
+                    self.features[self.feature_index["target_delta_s"]] = delta_s*delta_step/(delta_step-i)
+                    self.features[self.feature_index["target_delta_d"]] = delta_d*delta_step/(delta_step-i)
 
-                    target_state = cr_scenario.obstacles[startframe-delta_step_2+i][vehicle_id].initial_state
-                    self.features[self.feature_index["target_velocity_s_2"]] = np.cos(target_state.posF.phi)*target_state.velocity
-                    self.features[self.feature_index["target_velocity_d_2"]] = np.sin(target_state.posF.phi)*target_state.velocity
-
-                    self.features[self.feature_index["target_lanelet_id_2"]] = ego_vehicle.initial_state.posF.ind[1]
+                    target_state = cr_scenario.obstacles[startframe-delta_step+i][vehicle_id].initial_state
+                    self.features[self.feature_index["target_velocity_s"]] = np.cos(target_state.posF.phi)*target_state.velocity
+                    self.features[self.feature_index["target_velocity_d"]] = np.sin(target_state.posF.phi)*target_state.velocity
 
                     break
                 i += 1
-            assert(i < delta_step_2)
-
-
-        ego_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(ego_vehicle.initial_state.posF.ind[1])
-        ego_curve = ego_lanelet.center_curve
-        ego_curve_ind, _ = ego_vehicle.initial_state.posF.ind
-
-        ego_curvePt = lerp_curve(ego_curve[ego_curve_ind.i], ego_curve[ego_curve_ind.i+1], ego_curve_ind.t)
-        for idx in range(len(self.feature_index["shape_x"])):
-            if ego_curvePt.s + 1.0 <= ego_curve[-1].s:
-                next_curve_ind,_ = get_curve_index(ego_curve_ind, ego_curve, 1.0)
-                next_curvePt = lerp_curve(ego_curve[next_curve_ind.i], ego_curve[next_curve_ind.i+1], next_curve_ind.t)
-                proj = next_curvePt.pos.inertial2body(ego_curvePt.pos)
-                ego_curvePt = next_curvePt
-                ego_curve_ind = next_curve_ind
-                self.features[self.feature_index["shape_x"][idx]] = proj.x
-                self.features[self.feature_index["shape_y"][idx]] = proj.y
-                self.features[self.feature_index["shape_th"][idx]] = proj.th
-            else:
-                if len(ego_lanelet.successor) == 0:
-                    ego_curvePt.s += 1.0
-                    self.features[self.feature_index["shape_x"][idx]] = 1.0
-                    self.features[self.feature_index["shape_y"][idx]] = 0.0
-                    self.features[self.feature_index["shape_th"][idx]] = 0.0
-                elif len(ego_lanelet.successor) == 1:
-                    delta_s = ego_curvePt.s + 1.0 - ego_curve[-1].s
-                    ego_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(ego_lanelet.successor[0])
-                    ego_curve = ego_lanelet.center_curve
-                    next_curve_ind,_ = get_curve_index(CurveIndex(0,0.0), ego_curve, delta_s)
-                    next_curvePt = lerp_curve(ego_curve[next_curve_ind.i], ego_curve[next_curve_ind.i+1], next_curve_ind.t)
-                    proj = next_curvePt.pos.inertial2body(ego_curvePt.pos)
-                    ego_curvePt = next_curvePt
-                    ego_curve_ind = next_curve_ind
-                    self.features[self.feature_index["shape_x"][idx]] = proj.x
-                    self.features[self.feature_index["shape_y"][idx]] = proj.y
-                    self.features[self.feature_index["shape_th"][idx]] = proj.th
-                else:
-                    next_lanelet = None
-                    for succ in ego_lanelet.successor:
-                        succ_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ)
-                        if LaneletType.URBAN in succ_lanelet.lanelet_type:
-                            next_lanelet = succ_lanelet
-                            break
-                    else:
-                        print(ego_lanelet.lanelet_id)
-                    delta_s = ego_curvePt.s + 1.0 - ego_curve[-1].s
-                    ego_lanelet = next_lanelet
-                    ego_curve = ego_lanelet.center_curve
-                    next_curve_ind,_ = get_curve_index(CurveIndex(0,0.0), ego_curve, delta_s)
-                    next_curvePt = lerp_curve(ego_curve[next_curve_ind.i], ego_curve[next_curve_ind.i+1], next_curve_ind.t)
-                    proj = next_curvePt.pos.inertial2body(ego_curvePt.pos)
-                    ego_curvePt = next_curvePt
-                    ego_curve_ind = next_curve_ind
-                    self.features[self.feature_index["shape_x"][idx]] = proj.x
-                    self.features[self.feature_index["shape_y"][idx]] = proj.y
-                    self.features[self.feature_index["shape_th"][idx]] = proj.th
+            assert(i < delta_step)
 
         return self.features
+
 
 class CoreFeatureExtractor0:
     def __init__(self):
@@ -1953,8 +2086,9 @@ class NeighborFeatureExtractor:
                 self.feature_info[nn+feature_names[i]] = feature_ranges[i]
                 self.feature_index[nn+feature_names[i]] = index
                 index += 1
-    def set_step_length(self, step_length):
+    def set_step_length_and_maneuver_horizon(self, step_length, horizon):
         self.step_length = step_length
+        self.horizon = horizon
     def get_features(self, cr_scenario, vehicle_id, startframe):
         self.features = np.zeros(self.num_features, dtype=np.float32)
         ret = cr_scenario.get_attribute(NEIGHBOR_FORE_REAR_LEFT_MID_RIGHT, vehicle_id, startframe)
@@ -2064,24 +2198,359 @@ class NeighborFeatureExtractor:
 
         return self.features
 
+class VehicleToLaneletFeatureExtractor:
+    def __init__(self):
+        self.num_features = 10
+        self.feature_info = {"isCurrent":{"high":1, "low":0},
+                             "isTarget":{"high":1, "low":0},
+                             "xs":{"high":40., "low":-40.},
+                             "ys":{"high":40., "low":-40.},}
+        self.feature_index = {"isCurrent":0,
+                              "isTarget":1,
+                              "xs":[2,3,4,5],
+                              "ys":[6,7,8,9]}
+    def set_range_and_horizon(self, max_s, horizon):
+        self.max_s = max_s
+        self.horizon = horizon
+    def get_features(self, cr_scenario, vehicle_id, startframe):
+        feature_inds = []
+        ego_vehicle = cr_scenario.obstacles[startframe][vehicle_id]
+        ego_posG = ego_vehicle.initial_state.posG
+        ego_posF = ego_vehicle.initial_state.posF
+        ego_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(ego_posF.ind[1])
+        ego_curve = ego_lanelet.center_curve
+        _, current_index = cr_scenario.locate_on_grid(startframe, vehicle_id)
+        ego_curvePt = lerp_curve(ego_curve[ego_posF.ind[0].i], ego_curve[ego_posF.ind[0].i+1], ego_posF.ind[0].t)
+        lanelets_from_to_index = {}
+        if ego_curvePt.s + self.max_s > ego_curve[-1].s:
+            lanelets_from_to_index[ego_lanelet.lanelet_id] = (ego_posF.ind[0], CurveIndex(len(ego_curve)-2,1.0))
+            for succ in ego_lanelet.successor:
+                succ_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ)
+                succ_curve = succ_lanelet.center_curve
+                if ego_curvePt.s +self.max_s > ego_curve[-1].s + succ_curve[-1].s:
+                    lanelets_from_to_index[succ] = (CurveIndex(0,0.0), CurveIndex(len(succ_curve)-2,1.0))
+                    if ego_lanelet.adj_left is None and succ_lanelet.adj_left is not None:
+                        succ_left_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_lanelet.adj_left)
+                        succ_left_curve = succ_left_lanelet.center_curve
+                        lanelets_from_to_index[succ_lanelet.adj_left] = (CurveIndex(0,0.0), CurveIndex(len(succ_left_curve)-2,1.0))
+                    if ego_lanelet.adj_right is None and succ_lanelet.adj_right is not None:
+                        succ_right_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_lanelet.adj_right)
+                        succ_right_curve = succ_right_lanelet.center_curve
+                        lanelets_from_to_index[succ_lanelet.adj_right] = (CurveIndex(0,0.0), CurveIndex(len(succ_right_curve)-2,1.0))
+
+                    for succ_succ in succ_lanelet.successor:
+                        succ_succ_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_succ)
+                        succ_succ_curve = succ_succ_lanelet.center_curve
+                        to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_succ_curve, ego_curvePt.s+self.max_s-ego_curve[-1].s-succ_curve[-1].s)
+                        lanelets_from_to_index[succ_succ] = (CurveIndex(0,0.0), to_index)
+                        if succ_succ_lanelet.adj_left is not None:
+                            succ_succ_left_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_succ_lanelet.adj_left)
+                            succ_succ_left_curve = succ_succ_left_lanelet.center_curve
+                            to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_succ_left_curve, ego_curvePt.s+self.max_s-ego_curve[-1].s-succ_curve[-1].s)
+                            lanelets_from_to_index[succ_succ_lanelet.adj_left] = (CurveIndex(0,0.0), to_index)
+                        if succ_succ_lanelet.adj_right is not None:
+                            succ_succ_right_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_succ_lanelet.adj_right)
+                            succ_succ_right_curve = succ_succ_right_lanelet.center_curve
+                            to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_succ_right_curve, ego_curvePt.s+self.max_s-ego_curve[-1].s-succ_curve[-1].s)
+                            lanelets_from_to_index[succ_succ_lanelet.adj_right] = (CurveIndex(0,0.0), to_index)
+                else:
+                    to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_curve, ego_curvePt.s+self.max_s-ego_curve[-1].s)
+                    lanelets_from_to_index[succ] = (CurveIndex(0,0.0), to_index)
+                    if ego_lanelet.adj_left is None and succ_lanelet.adj_left is not None:
+                        succ_left_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_lanelet.adj_left)
+                        succ_left_curve = succ_left_lanelet.center_curve
+                        to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_left_curve, ego_curvePt.s+self.max_s-ego_curve[-1].s)
+                        lanelets_from_to_index[succ_lanelet.adj_left] = (CurveIndex(0,0.0), to_index)
+                    if ego_lanelet.adj_right is None and succ_lanelet.adj_right is not None:
+                        succ_right_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_lanelet.adj_right)
+                        succ_right_curve = succ_right_lanelet.center_curve
+                        to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_right_curve, ego_curvePt.s+self.max_s-ego_curve[-1].s)
+                        lanelets_from_to_index[succ_lanelet.adj_right] = (CurveIndex(0,0.0), to_index)
+        else:
+            to_index, _ = get_curve_index(ego_posF.ind[0], ego_curve, self.max_s)
+            lanelets_from_to_index[ego_lanelet.lanelet_id] = (ego_posF.ind[0], to_index)
+        if ego_lanelet.adj_left is not None:
+            ego_left_posF = Frenet(ego_posG.projF(cr_scenario.lanelet_network, [ego_lanelet.adj_left]), cr_scenario.lanelet_network)
+            ego_left_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(ego_left_posF.ind[1])
+            ego_left_curve = ego_left_lanelet.center_curve
+            ego_left_curvePt = lerp_curve(ego_left_curve[ego_left_posF.ind[0].i], ego_left_curve[ego_left_posF.ind[0].i+1], ego_left_posF.ind[0].t)
+            if ego_left_curvePt.s + self.max_s > ego_left_curve[-1].s:
+                lanelets_from_to_index[ego_left_lanelet.lanelet_id] = (ego_left_posF.ind[0], CurveIndex(len(ego_left_curve)-2,1.0))
+                for succ in ego_left_lanelet.successor:
+                    succ_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ)
+                    succ_curve = succ_lanelet.center_curve
+                    if ego_left_curvePt.s +self.max_s > ego_left_curve[-1].s + succ_curve[-1].s:
+                        lanelets_from_to_index[succ] = (CurveIndex(0,0.0), CurveIndex(len(succ_curve)-2,1.0))
+                        for succ_succ in succ_lanelet.successor:
+                            succ_succ_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_succ)
+                            succ_succ_curve = succ_succ_lanelet.center_curve
+                            to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_succ_curve, ego_left_curvePt.s+self.max_s-ego_left_curve[-1].s-succ_curve[-1].s)
+                            lanelets_from_to_index[succ_succ] = (CurveIndex(0,0.0), to_index)
+                    else:
+                        to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_curve, ego_left_curvePt.s+self.max_s-ego_left_curve[-1].s)
+                        lanelets_from_to_index[succ] = (CurveIndex(0,0.0), to_index)
+            else:
+                to_index, _ = get_curve_index(ego_left_posF.ind[0], ego_left_curve, self.max_s)
+                lanelets_from_to_index[ego_left_lanelet.lanelet_id] = (ego_left_posF.ind[0], to_index)
+        if ego_lanelet.adj_right is not None:
+            ego_right_posF = Frenet(ego_posG.projF(cr_scenario.lanelet_network, [ego_lanelet.adj_right]), cr_scenario.lanelet_network)
+            ego_right_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(ego_right_posF.ind[1])
+            ego_right_curve = ego_right_lanelet.center_curve
+            ego_right_curvePt = lerp_curve(ego_right_curve[ego_right_posF.ind[0].i], ego_right_curve[ego_right_posF.ind[0].i+1], ego_right_posF.ind[0].t)
+            if ego_right_curvePt.s + self.max_s > ego_right_curve[-1].s:
+                lanelets_from_to_index[ego_right_lanelet.lanelet_id] = (ego_right_posF.ind[0], CurveIndex(len(ego_right_curve)-2,1.0))
+                for succ in ego_right_lanelet.successor:
+                    succ_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ)
+                    succ_curve = succ_lanelet.center_curve
+                    if ego_right_curvePt.s +self.max_s > ego_right_curve[-1].s + succ_curve[-1].s:
+                        lanelets_from_to_index[succ] = (CurveIndex(0,0.0), CurveIndex(len(succ_curve)-2,1.0))
+                        for succ_succ in succ_lanelet.successor:
+                            succ_succ_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_succ)
+                            succ_succ_curve = succ_succ_lanelet.center_curve
+                            to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_succ_curve, ego_right_curvePt.s+self.max_s-ego_right_curve[-1].s-succ_curve[-1].s)
+                            lanelets_from_to_index[succ_succ] = (CurveIndex(0,0.0), to_index)
+                    else:
+                        to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_curve, ego_right_curvePt.s+self.max_s-ego_right_curve[-1].s)
+                        lanelets_from_to_index[succ] = (CurveIndex(0,0.0), to_index)
+            else:
+                to_index, _ = get_curve_index(ego_right_posF.ind[0], ego_right_curve, self.max_s)
+                lanelets_from_to_index[ego_right_lanelet.lanelet_id] = (ego_right_posF.ind[0], to_index)
+        #print("from_tos", lanelets_from_to_index)
+        for index in range(len(cr_scenario.grids)):
+            grid = cr_scenario.grids[index]
+            if grid.from_lanelet_id in lanelets_from_to_index:
+                from_index, to_index = lanelets_from_to_index[grid.from_lanelet_id]
+                if to_index.i < grid.from_index.i or (to_index.i==grid.from_index.i and to_index.t < grid.from_index.t):
+                    continue
+                elif grid.to_lanelet_id == grid.from_lanelet_id:
+                    if from_index.i > grid.to_index.i or (from_index.i==grid.to_index.i and from_index.t > grid.to_index.t):
+                        continue
+                    else:
+                        feature_inds.append(index)
+                else:
+                    feature_inds.append(index)
+            elif grid.to_lanelet_id in lanelets_from_to_index and grid.points[1][1] in lanelets_from_to_index:
+                from_index, to_index = lanelets_from_to_index[grid.to_lanelet_id]
+                if from_index.i > grid.to_index.i or (from_index.i==grid.to_index.i and from_index.t > grid.to_index.t):
+                    continue
+                elif grid.to_lanelet_id == grid.from_lanelet_id:
+                    if to_index.i < grid.from_index.i or (to_index.i==grid.from_index.i and to_index.t < grid.from_index.t):
+                        continue
+                    else:
+                        feature_inds.append(index)
+                else:
+                    feature_inds.append(index)
+            elif index == current_index:
+                feature_inds.append(index)
+            else:
+                continue
+        horizon_step = int(self.horizon/cr_scenario.dt)
+        if vehicle_id in cr_scenario.obstacles[startframe+horizon_step].keys():
+            _, target_index = cr_scenario.locate_on_grid(startframe+horizon_step, vehicle_id, initial_cands=feature_inds)
+        else:
+            _, target_index = cr_scenario.locate_on_grid(startframe, vehicle_id, initial_cands=feature_inds)
+
+
+        assert current_index in feature_inds
+        assert target_index in feature_inds
+        final_features = {}
+        for feature_ind in feature_inds:
+            if current_index == feature_ind:
+                final_features[feature_ind] = [1]
+            else:
+                final_features[feature_ind] = [0]
+            if target_index == feature_ind:
+                final_features[feature_ind].append(1)
+            else:
+                final_features[feature_ind].append(0)
+            xs = []
+            ys = []
+            for pindex, planelet_id in cr_scenario.grids[feature_ind].points:
+                planelet = cr_scenario.lanelet_network.find_lanelet_by_id(planelet_id)
+                p_curve = planelet.center_curve
+                pcurve_pt = lerp_curve(p_curve[pindex.i],p_curve[pindex.i+1],pindex.t)
+                pproj = pcurve_pt.pos.inertial2body(ego_posG)
+                xs.append(pproj.x)
+                ys.append(pproj.y)
+            final_features[feature_ind].extend(xs)
+            final_features[feature_ind].extend(ys)
+        return final_features
+
+class VehicleToLaneletFeatureExtractor1:
+    def __init__(self):
+        self.num_features = 10
+        self.feature_info = {"isCurrent":{"high":1, "low":0},
+                             "isTarget":{"high":1, "low":0},
+                             "xs":{"high":40., "low":-40.},
+                             "ys":{"high":40., "low":-40.},}
+        self.feature_index = {"isCurrent":0,
+                              "isTarget":1,
+                              "xs":[2,3,4,5],
+                              "ys":[6,7,8,9]}
+    def set_range_and_horizon(self, max_s, horizon):
+        self.max_s = max_s
+        self.horizon = horizon
+    def get_features(self, cr_scenario, vehicle_id, startframe):
+        feature_inds = []
+        ego_vehicle = cr_scenario.obstacles[startframe][vehicle_id]
+        ego_posG = ego_vehicle.initial_state.posG
+        ego_posF = ego_vehicle.initial_state.posF
+        ego_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(ego_posF.ind[1])
+        ego_curve = ego_lanelet.center_curve
+        current_index = cr_scenario.locate_on_grid1(startframe, vehicle_id)
+        ego_curvePt = lerp_curve(ego_curve[ego_posF.ind[0].i], ego_curve[ego_posF.ind[0].i+1], ego_posF.ind[0].t)
+        lanelets_from_to_index = {}
+        if ego_curvePt.s + self.max_s > ego_curve[-1].s:
+            lanelets_from_to_index[ego_lanelet.lanelet_id] = (ego_posF.ind[0], CurveIndex(len(ego_curve)-2,1.0))
+            for succ in ego_lanelet.successor:
+                succ_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ)
+                succ_curve = succ_lanelet.center_curve
+                if ego_curvePt.s +self.max_s > ego_curve[-1].s + succ_curve[-1].s:
+                    lanelets_from_to_index[succ] = (CurveIndex(0,0.0), CurveIndex(len(succ_curve)-2,1.0))
+                    if ego_lanelet.adj_left is None and succ_lanelet.adj_left is not None:
+                        succ_left_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_lanelet.adj_left)
+                        succ_left_curve = succ_left_lanelet.center_curve
+                        lanelets_from_to_index[succ_lanelet.adj_left] = (CurveIndex(0,0.0), CurveIndex(len(succ_left_curve)-2,1.0))
+                    if ego_lanelet.adj_right is None and succ_lanelet.adj_right is not None:
+                        succ_right_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_lanelet.adj_right)
+                        succ_right_curve = succ_right_lanelet.center_curve
+                        lanelets_from_to_index[succ_lanelet.adj_right] = (CurveIndex(0,0.0), CurveIndex(len(succ_right_curve)-2,1.0))
+
+                    for succ_succ in succ_lanelet.successor:
+                        succ_succ_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_succ)
+                        succ_succ_curve = succ_succ_lanelet.center_curve
+                        to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_succ_curve, ego_curvePt.s+self.max_s-ego_curve[-1].s-succ_curve[-1].s)
+                        lanelets_from_to_index[succ_succ] = (CurveIndex(0,0.0), to_index)
+                        if succ_succ_lanelet.adj_left is not None:
+                            succ_succ_left_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_succ_lanelet.adj_left)
+                            succ_succ_left_curve = succ_succ_left_lanelet.center_curve
+                            to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_succ_left_curve, ego_curvePt.s+self.max_s-ego_curve[-1].s-succ_curve[-1].s)
+                            lanelets_from_to_index[succ_succ_lanelet.adj_left] = (CurveIndex(0,0.0), to_index)
+                        if succ_succ_lanelet.adj_right is not None:
+                            succ_succ_right_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_succ_lanelet.adj_right)
+                            succ_succ_right_curve = succ_succ_right_lanelet.center_curve
+                            to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_succ_right_curve, ego_curvePt.s+self.max_s-ego_curve[-1].s-succ_curve[-1].s)
+                            lanelets_from_to_index[succ_succ_lanelet.adj_right] = (CurveIndex(0,0.0), to_index)
+                else:
+                    to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_curve, ego_curvePt.s+self.max_s-ego_curve[-1].s)
+                    lanelets_from_to_index[succ] = (CurveIndex(0,0.0), to_index)
+                    if ego_lanelet.adj_left is None and succ_lanelet.adj_left is not None:
+                        succ_left_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_lanelet.adj_left)
+                        succ_left_curve = succ_left_lanelet.center_curve
+                        to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_left_curve, ego_curvePt.s+self.max_s-ego_curve[-1].s)
+                        lanelets_from_to_index[succ_lanelet.adj_left] = (CurveIndex(0,0.0), to_index)
+                    if ego_lanelet.adj_right is None and succ_lanelet.adj_right is not None:
+                        succ_right_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_lanelet.adj_right)
+                        succ_right_curve = succ_right_lanelet.center_curve
+                        to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_right_curve, ego_curvePt.s+self.max_s-ego_curve[-1].s)
+                        lanelets_from_to_index[succ_lanelet.adj_right] = (CurveIndex(0,0.0), to_index)
+        else:
+            to_index, _ = get_curve_index(ego_posF.ind[0], ego_curve, self.max_s)
+            lanelets_from_to_index[ego_lanelet.lanelet_id] = (ego_posF.ind[0], to_index)
+        if ego_lanelet.adj_left is not None:
+            ego_left_posF = Frenet(ego_posG.projF(cr_scenario.lanelet_network, [ego_lanelet.adj_left]), cr_scenario.lanelet_network)
+            ego_left_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(ego_left_posF.ind[1])
+            ego_left_curve = ego_left_lanelet.center_curve
+            ego_left_curvePt = lerp_curve(ego_left_curve[ego_left_posF.ind[0].i], ego_left_curve[ego_left_posF.ind[0].i+1], ego_left_posF.ind[0].t)
+            if ego_left_curvePt.s + self.max_s > ego_left_curve[-1].s:
+                lanelets_from_to_index[ego_left_lanelet.lanelet_id] = (ego_left_posF.ind[0], CurveIndex(len(ego_left_curve)-2,1.0))
+                for succ in ego_left_lanelet.successor:
+                    succ_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ)
+                    succ_curve = succ_lanelet.center_curve
+                    if ego_left_curvePt.s +self.max_s > ego_left_curve[-1].s + succ_curve[-1].s:
+                        lanelets_from_to_index[succ] = (CurveIndex(0,0.0), CurveIndex(len(succ_curve)-2,1.0))
+                        for succ_succ in succ_lanelet.successor:
+                            succ_succ_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_succ)
+                            succ_succ_curve = succ_succ_lanelet.center_curve
+                            to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_succ_curve, ego_left_curvePt.s+self.max_s-ego_left_curve[-1].s-succ_curve[-1].s)
+                            lanelets_from_to_index[succ_succ] = (CurveIndex(0,0.0), to_index)
+                    else:
+                        to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_curve, ego_left_curvePt.s+self.max_s-ego_left_curve[-1].s)
+                        lanelets_from_to_index[succ] = (CurveIndex(0,0.0), to_index)
+            else:
+                to_index, _ = get_curve_index(ego_left_posF.ind[0], ego_left_curve, self.max_s)
+                lanelets_from_to_index[ego_left_lanelet.lanelet_id] = (ego_left_posF.ind[0], to_index)
+        if ego_lanelet.adj_right is not None:
+            ego_right_posF = Frenet(ego_posG.projF(cr_scenario.lanelet_network, [ego_lanelet.adj_right]), cr_scenario.lanelet_network)
+            ego_right_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(ego_right_posF.ind[1])
+            ego_right_curve = ego_right_lanelet.center_curve
+            ego_right_curvePt = lerp_curve(ego_right_curve[ego_right_posF.ind[0].i], ego_right_curve[ego_right_posF.ind[0].i+1], ego_right_posF.ind[0].t)
+            if ego_right_curvePt.s + self.max_s > ego_right_curve[-1].s:
+                lanelets_from_to_index[ego_right_lanelet.lanelet_id] = (ego_right_posF.ind[0], CurveIndex(len(ego_right_curve)-2,1.0))
+                for succ in ego_right_lanelet.successor:
+                    succ_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ)
+                    succ_curve = succ_lanelet.center_curve
+                    if ego_right_curvePt.s +self.max_s > ego_right_curve[-1].s + succ_curve[-1].s:
+                        lanelets_from_to_index[succ] = (CurveIndex(0,0.0), CurveIndex(len(succ_curve)-2,1.0))
+                        for succ_succ in succ_lanelet.successor:
+                            succ_succ_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(succ_succ)
+                            succ_succ_curve = succ_succ_lanelet.center_curve
+                            to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_succ_curve, ego_right_curvePt.s+self.max_s-ego_right_curve[-1].s-succ_curve[-1].s)
+                            lanelets_from_to_index[succ_succ] = (CurveIndex(0,0.0), to_index)
+                    else:
+                        to_index, _ = get_curve_index(CurveIndex(0,0.0), succ_curve, ego_right_curvePt.s+self.max_s-ego_right_curve[-1].s)
+                        lanelets_from_to_index[succ] = (CurveIndex(0,0.0), to_index)
+            else:
+                to_index, _ = get_curve_index(ego_right_posF.ind[0], ego_right_curve, self.max_s)
+                lanelets_from_to_index[ego_right_lanelet.lanelet_id] = (ego_right_posF.ind[0], to_index)
+
+        for index in range(len(cr_scenario.grids)):
+            grid = cr_scenario.grids[index]
+            if index == current_index:
+                feature_inds.append(index)
+                continue
+            for ind in grid.ind_list:
+                if ind[1] in lanelets_from_to_index:
+                    from_index, to_index = lanelets_from_to_index[ind[1]]
+                    if from_index.i < ind[0].i or (from_index.i==ind[0].i and from_index.t < ind[0].t):
+                        if to_index.i > ind[0].i or (to_index.i==ind[0].i and to_index.t > ind[0].t):
+                            feature_inds.append(index)
+                            break
+
+        horizon_step = int(self.horizon/cr_scenario.dt)
+        if vehicle_id in cr_scenario.obstacles[startframe+horizon_step].keys():
+            target_index = cr_scenario.locate_on_grid1(startframe+horizon_step, vehicle_id, initial_cands=feature_inds)
+        else:
+            target_index = cr_scenario.locate_on_grid1(startframe, vehicle_id, initial_cands=feature_inds)
+
+
+        assert current_index in feature_inds
+        assert target_index in feature_inds
+        final_features = {}
+        for feature_ind in feature_inds:
+            final_features[feature_ind] = {}
+            if current_index == feature_ind:
+                final_features[feature_ind]["current"] = 1
+            else:
+                final_features[feature_ind]["current"] = 0
+            if target_index == feature_ind:
+                final_features[feature_ind]["target"] = 1
+            else:
+                final_features[feature_ind]["target"] = 0
+            points = []
+            for pos in cr_scenario.grids[feature_ind].pos_list:
+                pproj = pos.inertial2body(ego_posG)
+                points.append((pproj.x, pproj.y, pproj.th))
+
+            final_features[feature_ind]["point"] = points
+        return final_features
+
 
 class LaneletToLaneletFeatureExtractor:
     def __init__(self):
-        self.num_features = 2
+        self.num_features = 5
         self.feature_info = {
                               "index":{"high":None, "low":None},
-                              "is_target": {"high":1., "low":0.},
-                              #"relation" : {"high":1., "low":0.},
+                              #"is_target": {"high":1., "low":0.},
+                              "relation" : {"high":1., "low":0.},
         }
         self.feature_index = {"index" : 0,
-                              "is_target": 1,
-                              #"relation" : [2,3,4,5],
+                              #"is_target": 1,
+                              "relation" : [1,2,3,4],
         }
-    def set_range(self, max_distance2, max_x, max_d, min_x):
-        self.max_distance2 = max_distance2
-        self.max_x = max_x
-        self.max_d = max_d
-        self.min_x = min_x
+    def set_grid_length(self, grid_length):
+        self.max_distance2 = (grid_length+2)**2
+        self.grid_length = grid_length
     def get_features(self, cr_scenario, grid_index):
         features = []
         ego_grid = cr_scenario.grids[grid_index]
@@ -2101,62 +2570,86 @@ class LaneletToLaneletFeatureExtractor:
             if distance2 > self.max_distance2:
                 continue
             feature[self.feature_index["index"]] = index
-            if ego_lanelet.lanelet_id == nei_lanelet.lanelet_id:
-                if nei_curve_pt.s - ego_curve_pt.s >= self.min_x:
-                    feature[self.feature_index["is_target"]] = 1.0
-                else:
-                    feature[self.feature_index["is_target"]] = 0.0
-            else:
-                new_proj = nei_curve_pt.pos.inertial2body(ego_curve_pt.pos)
-                if new_proj.x <= self.max_x and np.abs(new_proj.y) <= self.max_d and new_proj.x >= self.min_x:
-                    feature[self.feature_index["is_target"]] = 1.0
-                else:
-                    feature[self.feature_index["is_target"]] = 0.0
-                '''
-                intersect = [lanelet_id for lanelet_id in ego_lanelet.successor if lanelet_id in nei_lanelet.successor]
-                if nei_lanelet.lanelet_id == ego_lanelet.adj_left or nei_lanelet.lanelet_id == ego_lanelet.adj_right:
-                    feature[self.feature_index["is_target"]] = 1.0
-                elif nei_lanelet.lanelet_id in ego_lanelet.successor:
-                    feature[self.feature_index["is_target"]] = 1.0
-                elif nei_lanelet.lanelet_id in ego_lanelet.predecessor:
-                    feature[self.feature_index["is_target"]] = 0.0
-                elif len(intersect) > 0:
-                    feature[self.feature_index["is_target"]] = 0.0
-                else:
+            if ego_grid.to_lanelet_id == nei_grid.from_lanelet_id and ego_grid.to_index.i == nei_grid.from_index.i:
+                feature[self.feature_index["relation"]] = [0,0,1,0]
+                features.append(feature)
+                continue
+
+            if ego_lanelet.adj_left == nei_lanelet.lanelet_id:
+                projF = Frenet(ego_curve_pt.pos.projF(cr_scenario.lanelet_network, [nei_lanelet.lanelet_id]), cr_scenario.lanelet_network)
+                if projF.s-nei_curve_pt.s >= -self.grid_length and projF.s-nei_curve_pt.s <= self.grid_length:
+                    feature[self.feature_index["relation"]] = [1,0,0,0]
+                    features.append(feature)
                     continue
-                '''
+
+            if ego_lanelet.adj_right == nei_lanelet.lanelet_id:
+                projF = Frenet(ego_curve_pt.pos.projF(cr_scenario.lanelet_network, [nei_lanelet.lanelet_id]), cr_scenario.lanelet_network)
+                if projF.s-nei_curve_pt.s >= -self.grid_length and projF.s-nei_curve_pt.s <= self.grid_length:
+                    feature[self.feature_index["relation"]] = [0,1,0,0]
+                    features.append(feature)
+                    continue
+
+            intersect = [lanelet_id for lanelet_id in ego_lanelet.successor if lanelet_id in nei_lanelet.successor]
+            if len(intersect) != 0:
+                projF = Frenet(ego_curve_pt.pos.projF(cr_scenario.lanelet_network, [nei_lanelet.lanelet_id]), cr_scenario.lanelet_network)
+                if projF.s-nei_curve_pt.s >= -self.grid_length and projF.s-nei_curve_pt.s <= self.grid_length:
+                    feature[self.feature_index["relation"]] = [0,0,0,1]
+                    features.append(feature)
+                    continue
+        return features
+
+class LaneletToLaneletFeatureExtractor1:
+    def __init__(self):
+        self.num_features = 5
+        self.feature_info = {
+                              "index":{"high":None, "low":None},
+                              "relation" : {"high":1., "low":0.},
+        }
+        self.feature_index = {"index" : 0,
+                              "relation" : [1,2,3,4],
+        }
+    def set_grid_length(self, grid_length):
+        self.max_distance2 = (grid_length+2)**2
+        self.grid_length = grid_length
+    def get_features(self, cr_scenario, grid_index):
+        features = []
+        ego_grid = cr_scenario.grids[grid_index]
+        for front in ego_grid.front_list:
+            feature = np.zeros(self.num_features, dtype=np.float32)
+            feature[self.feature_index["index"]] = front
+            feature[self.feature_index["relation"]] = [0,0,1,0]
+            features.append(feature)
+        for left in ego_grid.left_list:
+            feature = np.zeros(self.num_features, dtype=np.float32)
+            feature[self.feature_index["index"]] = left
+            feature[self.feature_index["relation"]] = [1,0,0,0]
+            features.append(feature)
+        for right in ego_grid.right_list:
+            feature = np.zeros(self.num_features, dtype=np.float32)
+            feature[self.feature_index["index"]] = right
+            feature[self.feature_index["relation"]] = [0,1,0,0]
+            features.append(feature)
+        for conflict in ego_grid.conflict_list:
+            feature = np.zeros(self.num_features, dtype=np.float32)
+            feature[self.feature_index["index"]] = conflict
+            feature[self.feature_index["relation"]] = [0,0,0,1]
             features.append(feature)
         return features
+
 class LaneletFeatureExtractor:
     def __init__(self):
-        self.num_features = 15
+        self.num_features = 7#15
         self.features = np.zeros(self.num_features, dtype=np.float32)
         self.feature_info = {
                              "marker_left" : {"high": 1., "low":0.},
                              "marker_right" : {"high": 1., "low":0.},
                              "priority" : {"high":1., "low":0.},
-                             "start_x" : {"high":-40., "low":40.},
-                             "start_y" : {"high":-40., "low":40.},
-                             "middle_x" : {"high":-40., "low":40.},
-                             "middle_y" : {"high":-40., "low":40.},
-                             "middle_s" : {"high":0., "low":5.},
-                             "end_x" : {"high":-40., "low":40.},
-                             "end_y" : {"high":-40., "low":40.},
-                             "end_s" : {"high":0., "low":5.}
                              }
         self.feature_index = {
 
                              "marker_left" : [0,1,2],
                              "marker_right" : [3,4,5],
                              "priority" : 6,
-                             "start_x" : 7,
-                             "start_y" : 8,
-                             "middle_x" : 9,
-                             "middle_y" : 10,
-                             "middle_s" : 11,
-                             "end_x" : 12,
-                             "end_y" : 13,
-                             "end_s" : 14
                              }
     def get_features(self, cr_scenario, grid_index, vehicle_id, startframe):
         self.features = np.zeros(self.num_features, dtype=np.float32)
@@ -2181,6 +2674,7 @@ class LaneletFeatureExtractor:
         else:
             self.features[self.feature_index["priority"]] = 1.0
         ###
+        '''
         ego_vehicle = cr_scenario.obstacles[startframe][vehicle_id]
         ego_posG = ego_vehicle.initial_state.posG
         start_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(grid.from_lanelet_id)
@@ -2196,7 +2690,7 @@ class LaneletFeatureExtractor:
         middle_proj = middle_curve_pt.pos.inertial2body(ego_posG)
         self.features[self.feature_index["middle_x"]] = middle_proj.x
         self.features[self.feature_index["middle_y"]] = middle_proj.y
-        self.features[self.feature_index["middle_s"]] = grid.center_s
+        #self.features[self.feature_index["middle_s"]] = grid.center_s
 
         end_lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(grid.to_lanelet_id)
         end_curve = end_lanelet.center_curve
@@ -2204,7 +2698,74 @@ class LaneletFeatureExtractor:
         end_proj = end_curve_pt.pos.inertial2body(ego_posG)
         self.features[self.feature_index["end_x"]] = end_proj.x
         self.features[self.feature_index["end_y"]] = end_proj.y
-        self.features[self.feature_index["end_s"]] = grid.to_s
+        #self.features[self.feature_index["end_s"]] = grid.to_s
+        '''
+        return self.features
+
+class LaneletFeatureExtractor1:
+    def __init__(self):
+        self.num_features = 7#15
+        self.features = np.zeros(self.num_features, dtype=np.float32)
+        self.feature_info = {
+                             "marker_left" : {"high": 1., "low":0.},
+                             "marker_right" : {"high": 1., "low":0.},
+                             "priority" : {"high":1., "low":0.},
+                             }
+        self.feature_index = {
+
+                             "marker_left" : [0,1,2],
+                             "marker_right" : [3,4,5],
+                             "priority" : 6,
+                             }
+    def get_features(self, cr_scenario, grid_index, vehicle_id, startframe):
+        self.features = np.zeros(self.num_features, dtype=np.float32)
+        grid = cr_scenario.grids[grid_index]
+        marker_left_list = []
+        marker_right_list = []
+        priority_list = []
+        for ind in grid.ind_list:
+            lanelet = cr_scenario.lanelet_network.find_lanelet_by_id(ind[1])
+            if lanelet.line_marking_left_vertices ==  LineMarking.DASHED:
+                marker_left_list.append(1)
+            elif lanelet.line_marking_left_vertices ==  LineMarking.SOLID:
+                marker_left_list.append(2)
+            elif lanelet.line_marking_left_vertices ==  LineMarking.NO:
+                marker_left_list.append(3)
+
+            if lanelet.line_marking_right_vertices ==  LineMarking.DASHED:
+                marker_right_list.append(1)
+            elif lanelet.line_marking_right_vertices ==  LineMarking.SOLID:
+                marker_right_list.append(2)
+            elif lanelet.line_marking_right_vertices ==  LineMarking.NO:
+                marker_right_list.append(3)
+
+            if  LaneletType.ACCESS_RAMP in lanelet.lanelet_type or LaneletType.EXIT_RAMP in lanelet.lanelet_type:
+                priority_list.append(0)
+            else:
+                priority_list.append(1)
+        try:
+            marker_left = max(set(marker_left_list), key=marker_left_list.count)
+        except:
+            print(grid.ind_list, grid.pos_list, grid.id)
+            raise
+        marker_right = max(set(marker_right_list), key=marker_right_list.count)
+        priority = max(set(priority_list), key=priority_list.count)
+        if marker_left == 1:
+            self.features[self.feature_index["marker_left"]] = [1,0,0]
+        elif marker_left == 2:
+            self.features[self.feature_index["marker_left"]] = [0,1,0]
+        elif marker_left == 3:
+            self.features[self.feature_index["marker_left"]] = [0,0,1]
+
+        if marker_right == 1:
+            self.features[self.feature_index["marker_right"]] = [1,0,0]
+        elif marker_right == 2:
+            self.features[self.feature_index["marker_right"]] = [0,1,0]
+        elif marker_right == 3:
+            self.features[self.feature_index["marker_right"]] = [0,0,1]
+
+        self.features[self.feature_index["priority"]] = priority
+        ###
 
         return self.features
 
@@ -2392,9 +2953,9 @@ class MultiFeatureExtractor:
                     self.feature_index[feat_name] = sub_index
                 else:
                     self.feature_index[feat_name] = sub_index + int(np.sum(self.lengths[0:index]))
-    def set_step_length(self, step_length):
+    def set_step_length_and_maneuver_horizon(self, step_length, horizon):
         for subext in self.extractors:
-            subext.set_step_length(step_length)
+            subext.set_step_length_and_maneuver_horizon(step_length, horizon)
 
     def get_features(self, cr_scenario, vehicle_id, startframe):
         feature_index = 0
