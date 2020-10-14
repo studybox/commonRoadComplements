@@ -1,4 +1,5 @@
 import numpy as np
+import math
 from typing import *
 from commonroad.scenario.lanelet import Lanelet, LaneletNetwork, LineMarking
 
@@ -50,7 +51,40 @@ class VecSE2(VecE2):
             t = get_lerp_time( curve[-2].pos, curve[-1].pos, self)
             footpoint = lerp_pos( curve[-2].pos, curve[-1].pos, t)
             curveind = CurveIndex(ind-1, t)
-        return self.get_curve_projection(footpoint, curveind)
+        curve_proj, x = self.get_curve_projection(footpoint, curveind)
+        if curveind.i >= len(curve)-2 and curveind.t ==1.0:
+            return curve_proj
+        elif curveind.i == 0 and curveind.t == 0.0:
+            return curve_proj
+        if np.abs(x) >= 1.0:
+            best_curve_proj = curve_proj
+            best_x = x
+            if x > 0.0:
+                ds = 0.1
+                while ds <= x:
+                    new_curveind, _ = get_curve_index(curveind, curve, ds)
+                    if new_curveind.t > 1.0:
+                        break
+                    new_footpoint = lerp_pos(curve[new_curveind.i].pos,curve[new_curveind.i+1].pos, new_curveind.t)
+                    new_curve_proj, new_x = self.get_curve_projection(new_footpoint, new_curveind)
+                    if np.abs(new_x) < np.abs(best_x):
+                        best_x = new_x
+                        best_curve_proj = new_curve_proj
+                    ds += 0.1
+            else:
+                ds = -0.1
+                while ds >= x:
+                    new_curveind, _ = get_curve_index(curveind, curve, ds)
+                    if new_curveind.t < 0.0:
+                        break
+                    new_footpoint = lerp_pos(curve[new_curveind.i].pos,curve[new_curveind.i+1].pos, new_curveind.t)
+                    new_curve_proj, new_x = self.get_curve_projection(new_footpoint, new_curveind)
+                    if np.abs(new_x) < np.abs(best_x):
+                        best_x = new_x
+                        best_curve_proj = new_curve_proj
+                    ds -= 0.1
+            return best_curve_proj
+        return curve_proj
 
     def index_closest_to_point(self, curve):
 
@@ -93,13 +127,21 @@ class VecSE2(VecE2):
 
     def get_curve_projection(self, footpoint, curveind):
         F = self.inertial2body(footpoint)
-        return CurveProjection(curveind, F.y, F.th)
+        #print("curve", F.x, " ind ", curveind.i, " t ", curveind.t)
+        return CurveProjection(curveind, F.y, F.th), F.x
 
     def inertial2body(self, reference):
         s, c = np.sin(reference.th), np.cos(reference.th)
         deltax = self.x - reference.x
         deltay = self.y - reference.y
-        return VecSE2(c*deltax + s*deltay, c*deltay - s*deltax, self.th-reference.th)
+        return VecSE2(c*deltax + s*deltay, c*deltay - s*deltax, self._mod2pi(self.th-reference.th))
+
+    def _mod2pi(self, x):
+        if x > math.pi:
+            return self._mod2pi(x-2*math.pi)
+        if x <-math.pi:
+            return self._mod2pi(x+2*math.pi)
+        return x
 
     def proj(self, lanelet, lanelet_network, move_along_curves=True):
         curveproj = self.proj_on_curve(lanelet.center_curve)
@@ -159,6 +201,11 @@ class CurveIndex:
     def __init__(self, ind, t):
         self.i = ind
         self.t = t
+    def __str__(self):
+        return "Index: i {}, t {}".format(self.i, self.t)
+    def __repr__(self):
+        return "Index: i {}, t {}".format(self.i, self.t)
+
 class CurveProjection:
     def __init__(self, curveindex, d, phi):
         self.ind = curveindex
@@ -171,6 +218,59 @@ class LaneletProjection:
         self.lanelet_id = lanelet_id
     def get_lanelet_id(self):
         return self.lanelet_id
+
+class Grid():
+    def __init__(self, gid):
+        self.id = gid
+        self.pos_list,self.ind_list = [], []
+        self.front_list,self.back_list = [],[]
+        self.left_list, self.right_list = [], []
+        self.conflict_list = []
+    def add_pos(self, pos):
+        self.pos_list.append(pos)
+    def add_ind(self, ind):
+        self.ind_list.append(ind)
+    def add_front(self, gid):
+        if gid not in self.front_list:
+            self.front_list.append(gid)
+    def add_back(self, gid):
+        if gid not in self.back_list:
+            self.back_list.append(gid)
+    def add_left(self, gid):
+        if gid not in self.left_list:
+            self.left_list.append(gid)
+    def add_right(self, gid):
+        if gid not in self.right_list:
+            self.right_list.append(gid)
+    def add_conflict(self, gid):
+        if gid not in self.conflict_list:
+            self.conflict_list.append(gid)
+    def in_grid(self, ind, pos):
+        has_rear_pt = False
+        has_front_pt = False
+        same_lane = False
+        for gind in self.ind_list:
+            if gind[1] == ind[1]:
+                same_lane = True
+                if gind[0].i < ind[0].i or (gind[0].i==ind[0].i and gind[0].t<=ind[0].t):
+                    has_rear_pt = True
+                else:
+                    has_front_pt = True
+        if not same_lane:
+            return False
+        if has_front_pt and has_rear_pt:
+            return True
+        least_dist2 = 20
+        for gpos in self.pos_list:
+            if (gpos.x-pos.x)**2+(gpos.y-pos.y)**2 < least_dist2:
+                return True
+        return False
+
+    def __str__(self):
+        return "Grid {}".format(self.id)
+    def __repr__(self):
+        return "Grid {}".format(self.id)
+
 
 def proj_on_line(a : VecE2, b : VecE2):
     # dot(a,b) / dot(b,b) ⋅ b
@@ -252,14 +352,14 @@ class LaneLetCurve(Lanelet):
                  adjacent_left=None, adjacent_left_same_direction=None,
                  adjacent_right=None, adjacent_right_same_direction=None,
                  speed_limit=np.infty, line_marking_left_vertices=None,
-                 line_marking_right_vertices=None):
+                 line_marking_right_vertices=None, lanelet_type=set()):
         super().__init__(left_vertices, center_vertices, right_vertices,
                  lanelet_id,
-                 predecessor, successor,
-                 adjacent_left, adjacent_left_same_direction,
-                 adjacent_right, adjacent_right_same_direction,
-                  line_marking_left_vertices,
-                 line_marking_right_vertices)
+                 predecessor=predecessor, successor=successor,
+                 adjacent_left=adjacent_left, adjacent_left_same_direction=adjacent_left_same_direction,
+                 adjacent_right=adjacent_right, adjacent_right_same_direction=adjacent_right_same_direction,
+                  line_marking_left_vertices=line_marking_left_vertices,
+                 line_marking_right_vertices=line_marking_right_vertices, lanelet_type=lanelet_type)
         self.center_curve = center_curve
         self.speed_limit = speed_limit
 
@@ -328,12 +428,7 @@ def make_lanelet_curve_network(lanelet_network, speed_limit_dict):
                        adjacent_right=lanelet.adj_right, adjacent_right_same_direction=lanelet.adj_right_same_direction,
                        speed_limit=speed_limit_dict[lanelet.lanelet_id],
                        line_marking_left_vertices=lanelet.line_marking_left_vertices,
-                       line_marking_right_vertices=lanelet.line_marking_right_vertices)
+                       line_marking_right_vertices=lanelet.line_marking_right_vertices,
+                       lanelet_type=lanelet.lanelet_type)
         new_lanelets.append(new_lanelet)
     return LaneletNetwork.create_from_lanelet_list(new_lanelets)
-def make_grid(lanelet_network, center_pos, radius=50.0):
-    # make grid around the center_pos
-    # Options:
-    # 1 non-moving origin 2 moving origin
-    # find the closest curve Pt
-    return None
